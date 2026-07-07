@@ -30,3 +30,9 @@ chime = off
 #   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
 #   24   = show the clock, forced 24-hour  (e.g. 18:28)
 clock = off
+
+# Sprint burndown screen (rotate the device to landscape-left). Bearer token for
+# the Asana dashboard MCP the daemon polls every 5 min for To Do / Doing / Done
+# counts. Leave unset to disable the burndown screen (it shows "No sprint data").
+# The ASANA_TOKEN environment variable, if set, takes precedence over this line.
+# asana_token = <your-asana-dash-bearer-token>

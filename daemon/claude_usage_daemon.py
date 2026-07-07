@@ -597,8 +597,17 @@ async def poll_api(token: str) -> dict | None:
         log(f"API call failed: {e}")
         return None
     if resp.status_code >= 400:
-        log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
-        return None
+        # 429 while rate-limited still carries valid utilization headers —
+        # extract them so the device shows 100% instead of going idle.
+        if resp.status_code == 429 and (
+            resp.headers.get("anthropic-ratelimit-unified-5h-utilization")
+            or resp.headers.get("anthropic-ratelimit-unified-overage-utilization")
+        ):
+            log(f"API HTTP 429 (rate-limited) — extracting headers anyway")
+            # fall through to the header-parsing code below
+        else:
+            log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
 
     def hdr(name: str, default: str = "0") -> str:
         return resp.headers.get(name, default)

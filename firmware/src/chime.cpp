@@ -29,7 +29,18 @@ static bool es8311_setup(void) {
     if (es8311_init(es, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK) return false;
     es8311_sample_frequency_config(es, clk.mclk_frequency, clk.sample_frequency);
     es8311_microphone_config(es, false);
-    es8311_voice_volume_set(es, cfg.volume, NULL);
+
+    // The shared I2C bus also carries AXP2101/QMI8658 traffic during boot; a
+    // transient bus hiccup here (seen in the field as i2c_master_transmit
+    // ESP_ERR_INVALID_STATE) can silently leave this write unacknowledged,
+    // so the codec stays at its post-reset default volume instead of
+    // cfg.volume — chime_init() still reports success, but playback comes
+    // out near-silent. Retry until the write is confirmed to land.
+    for (int attempt = 1; attempt <= 5; attempt++) {
+        if (es8311_voice_volume_set(es, cfg.volume, NULL) == ESP_OK) break;
+        Serial.printf("chime: volume set attempt %d failed, retrying\n", attempt);
+        delay(5);
+    }
     return true;
 }
 
@@ -37,7 +48,13 @@ static void chime_task(void* arg) {
     if (cfg.amp_enable) cfg.amp_enable(true);
     delay(8);                                  // let the amp settle (avoids turn-on pop)
     i2s.write((uint8_t*)bell_pcm, bell_pcm_len);
-    delay(20);
+    // i2s.write() only blocks until the clip is queued into the DMA buffer, not
+    // until the codec has actually finished streaming it out — cutting the amp
+    // right after write() returns silently truncated almost the whole clip.
+    // 16-bit stereo = 4 bytes/frame; hold the amp open for the real duration.
+    uint32_t frames  = bell_pcm_len / 4;
+    uint32_t play_ms = (frames * 1000UL) / cfg.sample_rate;
+    delay(play_ms + 20);                       // + settle margin before muting
     if (cfg.amp_enable) cfg.amp_enable(false);
     playing = false;
     vTaskDelete(nullptr);
@@ -63,10 +80,15 @@ bool chime_init(const ChimeConfig& c) {
 }
 
 void chime_play(void) {
-    if (!ready || playing) return;
+    if (!ready || playing) {
+        Serial.printf("chime: play skipped (ready=%d playing=%d)\n", ready, playing);
+        return;
+    }
     playing = true;
-    if (xTaskCreatePinnedToCore(chime_task, "chime", 4096, nullptr, 1, nullptr, 0) != pdPASS)
+    if (xTaskCreatePinnedToCore(chime_task, "chime", 4096, nullptr, 1, nullptr, 0) != pdPASS) {
+        Serial.println("chime: task create failed");
         playing = false;   // couldn't spawn — stay silent rather than wedge the flag
+    }
 }
 
 void chime_play_repeated(int count, uint32_t interval_ms) {

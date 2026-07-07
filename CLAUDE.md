@@ -101,6 +101,29 @@ If `pio` isn't on PATH: try `~/.platformio/penv/bin/pio` (Linux/macOS pio instal
 
 Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux. Both expose the ESP32-S3 native USB-JTAG (no boot-mode dance needed).
 
+### Building on Windows
+
+`pio` isn't a system package here — install via `pip install platformio` and invoke as
+`python -m platformio ...` (no `pio` shim gets put on PATH by pip alone). Three gotchas
+specific to native Windows, found the hard way flashing a real 2.16 board:
+
+1. **Never build from Git Bash/MSYS.** pioarduino's `idf_tools.py` explicitly detects
+   MSYS and refuses to install the toolchain (`ERROR: MSys/Mingw is not supported`),
+   silently leaving `xtensa-esp32s3-elf-g++` missing from PATH and the build failing at
+   link time with a cryptic "not recognized" error. Run the build from a real PowerShell
+   or cmd.exe session instead.
+2. **Accented/non-ASCII characters in the repo path break the linker.** `ld.exe` mis-decodes
+   a path segment like `Área de Trabalho` and fails with `cannot open map file ... No such
+   file or directory`, even though the same path built fine for every other toolchain step.
+   Fix: point the build output outside the accented path via
+   `$env:PLATFORMIO_BUILD_DIR = "C:\pio_build\<name>"` before `pio run` — no edit to
+   `platformio.ini` needed, and it's a per-machine workaround, not something to commit.
+3. **Console progress bars crash the upload under the default codepage.** esptool's
+   Unicode progress-bar glyphs raise `UnicodeEncodeError` under PowerShell's default
+   cp1252, killing the reader thread mid-flash (the flash itself may still be fine, but
+   you lose all visibility). Run `chcp 65001` and set `$env:PYTHONIOENCODING = "utf-8"`
+   before `pio run -t upload`.
+
 ## QA your own UI changes — don't ask the user
 
 The firmware ships a `screenshot` serial command that dumps the LVGL framebuffer. `./screenshot.sh out.png [port]` captures a PNG sized to the active display (480×480 or 368×448). **Use this on every UI iteration** — Read the PNG with the Read tool, verify the change visually, iterate. Script auto-picks the macOS/Linux default port and falls back to pio's bundled Python if pyserial isn't on the system Python.
@@ -119,6 +142,7 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 8. **LVGL RGB565A8 is planar.** `w*h` RGB565 pixels followed by `w*h` alpha bytes; `data_size = w*h*3`, `stride = w*2`. Use `init_icon_dsc_rgb565a8()` for icons that overlap non-uniform backgrounds (e.g. battery over splash). Lucide source PNGs are black-on-transparent — converter must tint to white or icons render invisible. See `tools/png_to_lvgl.js`.
 9. **Per-board pre-init is `board_init()`.** Each board's `board_init.cpp` brings up `Wire` and any reset-gating IO expander BEFORE `display_hal_init()`. Skipping the IO expander release on AMOLED-1.8 leaves SH8601 + FT3168 in reset and they silently fail to probe.
 10. **No `#ifdef BOARD_*` in shared code.** The whole point of the refactor — if you're about to add one, you probably want a `BoardCaps` field or a per-board file instead. See `docs/porting/capability-flags.md`.
+11. **Reset chime is 3 pulses over 60s, not a single beep.** `chime.cpp`'s `chime_play_repeated()` (called from each sound-capable board's `sound_hal_play_reset()`) fires immediately then again at `CHIME_RESET_INTERVAL_MS` (30s) via `chime_tick()` in the main loop — constants live in `chime.h`. The `buzz` serial command triggers the same repeated sequence (not a single `chime_play()`), so it previews the real on-device experience. Only `waveshare_amoled_216` and `waveshare_amoled_18` wire a speaker (`BOARD_HAS_SOUND`); the C6 boards' `sound_hal_play_reset()` is a no-op stub.
 
 ## Icons
 
@@ -154,6 +178,23 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 ## Daemon / host side
 
 Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic API, sends JSON over BLE GATT. Run with `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path to the script — repoint it when switching between the worktree and the main checkout.
+
+**Windows has its own native daemon**, not a WSL/bash port: `daemon/claude_usage_daemon_windows.py`
+(WinRT BLE via `bleak`, credentials read from `%USERPROFILE%\.claude\.credentials.json`) plus
+`daemon/tray_windows.py` (system-tray icon + status) and `daemon/autostart_windows.py`
+(per-user `HKCU\...\Run` entry, no admin). Turnkey setup: `install-windows.ps1` from the repo
+root — creates a venv, installs `daemon/requirements-windows.txt`, registers autostart, launches
+the tray. The device must be paired via Windows Bluetooth settings once first (bonded BLE HID
+keyboard); the daemon then connects to the bonded address directly since a paired device stops
+advertising. See `daemon/README-windows.md` for the full walkthrough and troubleshooting table.
+macOS has its own daemon too: `daemon/claude_usage_daemon.py`.
+
+All three daemons (`bash`/macOS-Linux python/Windows python) share one config file format —
+see `daemon/config.example` — re-read every poll (~60s, no restart needed): `chime = on|off`
+(session-reset sound) and `clock = off|auto|12|24`. On Windows the file lives at
+`%LOCALAPPDATA%\Clawdmeter\config`; the tray's right-click menu has a live "Play chime on
+reset" checkbox that reads/writes it (`read_chime_setting`/`write_chime_setting` in
+`claude_usage_daemon_windows.py`) — no hand-editing required.
 
 **Discovery & resilience:**
 

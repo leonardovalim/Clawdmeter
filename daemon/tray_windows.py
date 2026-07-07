@@ -187,6 +187,7 @@ def main() -> None:
         write_chime_setting,
     )
     from daemon.icon_assets import load_logo_rgba, build_state_icons
+    from daemon.version import DAEMON_VERSION
 
     # Build per-state icons once at startup; swap icon.icon per tick (never recomposite).
     base = load_logo_rgba(os.path.join(_REPO_ROOT, "firmware", "src", "logo.h"))
@@ -243,9 +244,13 @@ def main() -> None:
         write_chime_setting("off" if read_chime_setting() == "on" else "on")
         icon.update_menu()
 
+    version_text = f"Version: {DAEMON_VERSION}"
+
     icon.menu = Menu(
         # Non-clickable status header; text updates via update_menu() on state change.
         MenuItem(lambda _item: header_text(ts), None, enabled=False),
+        # Non-clickable version line — confirms which checkout is running.
+        MenuItem(version_text, None, enabled=False),
         # Start-at-login toggle: checked= is a CALLABLE for live query (Pitfall 6).
         MenuItem("Start at login", _on_toggle, checked=lambda _item: autostart.is_enabled()),
         # Chime toggle: same live-query pattern. The daemon re-reads CONFIG_FILE

@@ -13,6 +13,12 @@ static ChimeConfig   cfg;
 static bool          ready   = false;
 static volatile bool playing = false;
 
+// chime_play_repeated() state, advanced from chime_tick() on the main loop
+// (not the playback task) so it stays a plain non-reentrant counter.
+static int      repeat_remaining  = 0;
+static uint32_t repeat_interval   = 0;
+static uint32_t next_repeat_at_ms = 0;
+
 static bool es8311_setup(void) {
     es8311_handle_t es = es8311_create(0, cfg.es8311_addr);   // I2C port 0 (shared Wire bus)
     if (!es) return false;
@@ -63,4 +69,19 @@ void chime_play(void) {
         playing = false;   // couldn't spawn — stay silent rather than wedge the flag
 }
 
-void chime_tick(void) {}   // playback runs in chime_task; nothing to poll
+void chime_play_repeated(int count, uint32_t interval_ms) {
+    if (count <= 0) return;
+    chime_play();
+    repeat_remaining  = count - 1;
+    repeat_interval   = interval_ms;
+    next_repeat_at_ms = millis() + interval_ms;
+}
+
+void chime_tick(void) {
+    // millis() subtraction wraps safely across the ~49-day rollover.
+    if (repeat_remaining > 0 && (int32_t)(millis() - next_repeat_at_ms) >= 0) {
+        chime_play();
+        repeat_remaining--;
+        next_repeat_at_ms += repeat_interval;
+    }
+}

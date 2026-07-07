@@ -1,0 +1,12 @@
+# macOS dependency manifest for claude_usage_daemon.py + tray_macos.py.
+# The Windows/Linux daemons manage their own dependencies separately.
+#
+# Media now-playing (the SCREEN_MEDIA field) uses `osascript` against Spotify /
+# Music via AppleScript — a built-in macOS binary, so no extra pip dep for that.
+bleak
+httpx
+pystray
+Pillow
+# pystray's macOS (NSStatusItem) backend needs the Cocoa/Quartz bridges.
+pyobjc-framework-Cocoa
+pyobjc-framework-Quartz

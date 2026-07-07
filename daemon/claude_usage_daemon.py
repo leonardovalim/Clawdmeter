@@ -321,6 +321,31 @@ def read_chime_setting() -> str:
     return "off"
 
 
+def write_chime_setting(value: str) -> None:
+    """Persist the `chime` option (on/off) to CONFIG_FILE.
+
+    Rewrites the existing `chime = ...` line in place if present, appends it
+    otherwise. All other lines (comments, `clock`, etc.) are preserved verbatim
+    so the tray toggle never clobbers hand-edited settings. The daemon re-reads
+    CONFIG_FILE every poll, so the change takes effect within ~60s with no
+    restart (see read_chime_setting). Mirrors the Windows daemon's writer so the
+    macOS tray's "Play chime on reset" checkbox behaves identically.
+    """
+    value = "on" if value == "on" else "off"
+    lines = CONFIG_FILE.read_text().splitlines() if CONFIG_FILE.exists() else []
+
+    for i, line in enumerate(lines):
+        key = line.split("#", 1)[0].split("=", 1)[0].strip().lower()
+        if key == "chime":
+            lines[i] = f"chime = {value}"
+            break
+    else:
+        lines.append(f"chime = {value}")
+
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text("\n".join(lines) + "\n")
+
+
 def read_clock_setting() -> str:
     """Read the `clock` option from the config file. One of: off|auto|12|24.
 
@@ -839,7 +864,16 @@ def unpair_macos() -> bool:
     return True
 
 
-async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
+def _any_token_available() -> bool:
+    """True if at least one configured config dir currently has an OAuth token.
+
+    Lets the tray distinguish a genuine "no token — run claude login" error from
+    a transient API/network failure (which must NOT raise the actionable toast).
+    """
+    return any(read_token_for(d) for d in read_config_dirs())
+
+
+async def connect_and_run(target, stop_event: asyncio.Event, tray_state=None) -> bool:
     """Connect to a target and poll until disconnected or stopped.
 
     ``target`` is either an address string (Linux) or a BLEDevice carrying
@@ -887,9 +921,16 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 payload = await poll_active_payload()
                 if payload is None:
                     log("No usable config dir this cycle")
+                    # Only surface the actionable "token expired" error when there
+                    # is genuinely no token anywhere — a None payload can also mean
+                    # a transient network/API failure, which must not toast.
+                    if tray_state is not None and not _any_token_available():
+                        tray_state.set_error("token expired — run claude login")
                 elif await session.write_payload(payload):
                     last_poll = time.time()
                     used_successfully = True
+                    if tray_state is not None:
+                        tray_state.set_connected(time.time())
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
@@ -905,19 +946,31 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     return used_successfully
 
 
-async def main() -> None:
+async def main(tray_state=None) -> None:
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+
+    # Populate the shared state object so the tray can route Quit through
+    # loop.call_soon_threadsafe (asyncio.Event is not thread-safe). Additive —
+    # the stop_event/loop lines above are unchanged.
+    if tray_state is not None:
+        tray_state.loop = loop
+        tray_state.stop_event = stop_event
 
     def _stop(*_args: object) -> None:
         log("Daemon stopping")
         stop_event.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _stop)
-        except NotImplementedError:
-            signal.signal(sig, _stop)
+    # OS signal handlers can only be installed from the main thread. Under the
+    # tray the loop runs in a background thread (pystray owns the main thread),
+    # so skip signal setup there — the tray owns clean shutdown via stop_event.
+    import threading
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _stop)
+            except NotImplementedError:
+                signal.signal(sig, _stop)
 
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
@@ -931,6 +984,8 @@ async def main() -> None:
         skip_addr = None
         if not target:
             log(f"Device not found, retrying in {backoff}s...")
+            if tray_state is not None:
+                tray_state.set_scanning()
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=backoff)
             except asyncio.TimeoutError:
@@ -939,8 +994,10 @@ async def main() -> None:
             continue
 
         addr = target if isinstance(target, str) else target.address
-        ok = await connect_and_run(target, stop_event)
+        ok = await connect_and_run(target, stop_event, tray_state)
         if not ok:
+            if tray_state is not None:
+                tray_state.set_scanning()
             if sys.platform == "darwin":
                 # No string cache to drop; instead skip this stale handle on
                 # the next retrieveConnected so the scan fallback is reachable.

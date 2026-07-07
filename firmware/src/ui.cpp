@@ -5,6 +5,7 @@
 #include "logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
+#include "version.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -15,6 +16,7 @@ LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
 LV_FONT_DECLARE(font_styrene_16);
 LV_FONT_DECLARE(font_styrene_14);
+LV_FONT_DECLARE(font_styrene_12);
 LV_FONT_DECLARE(font_mono_32);
 
 // Layout values computed from the active board's geometry. Populated once
@@ -130,6 +132,7 @@ static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idl
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
+static lv_obj_t* lbl_version;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
 // ---- Live-data freshness → which usage sub-view to show ----
@@ -465,6 +468,18 @@ void ui_init(void) {
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_obj_set_pos(battery_img, L.scr_w - 48 - L.margin, L.title_y);
 
+    // Version label, splash-only — a discreet on-device confirmation that a
+    // flash actually landed, with no serial monitor needed. Created last so
+    // it renders on top of the splash animation; visibility toggled in
+    // ui_show_screen() alongside logo_img/battery_img.
+    lbl_version = lv_label_create(scr);
+    lv_label_set_text(lbl_version, FIRMWARE_VERSION);
+    lv_obj_set_style_text_font(lbl_version, &font_styrene_12, 0);
+    lv_obj_set_style_text_color(lbl_version, COL_DIM, 0);
+    // -L.margin, not a few px: the panel's corners are physically rounded
+    // and hidden by the bezel, so anything hugging the literal corner never
+    // reaches the eye even though it's in the framebuffer (see CLAUDE.md).
+    lv_obj_align(lbl_version, LV_ALIGN_BOTTOM_RIGHT, -L.margin, -L.margin);
 }
 
 void ui_update(const UsageData* data) {
@@ -657,6 +672,11 @@ void ui_show_screen(screen_t screen) {
     if (logo_img) {
         if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
         else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (lbl_version) {
+        if (screen == SCREEN_SPLASH) lv_obj_clear_flag(lbl_version, LV_OBJ_FLAG_HIDDEN);
+        else                          lv_obj_add_flag(lbl_version, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;

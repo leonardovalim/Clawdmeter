@@ -180,7 +180,12 @@ def main() -> None:
     from pystray import Menu, MenuItem
 
     import daemon.autostart_windows as autostart
-    from daemon.claude_usage_daemon_windows import main as daemon_main, log as daemon_log
+    from daemon.claude_usage_daemon_windows import (
+        main as daemon_main,
+        log as daemon_log,
+        read_chime_setting,
+        write_chime_setting,
+    )
     from daemon.icon_assets import load_logo_rgba, build_state_icons
 
     # Build per-state icons once at startup; swap icon.icon per tick (never recomposite).
@@ -234,11 +239,18 @@ def main() -> None:
             autostart.enable(tray_script=os.path.abspath(__file__))
         icon.update_menu()
 
+    def _on_toggle_chime(_icon_ref, _item) -> None:
+        write_chime_setting("off" if read_chime_setting() == "on" else "on")
+        icon.update_menu()
+
     icon.menu = Menu(
         # Non-clickable status header; text updates via update_menu() on state change.
         MenuItem(lambda _item: header_text(ts), None, enabled=False),
         # Start-at-login toggle: checked= is a CALLABLE for live query (Pitfall 6).
         MenuItem("Start at login", _on_toggle, checked=lambda _item: autostart.is_enabled()),
+        # Chime toggle: same live-query pattern. The daemon re-reads CONFIG_FILE
+        # every poll (~60s), so this takes effect without restarting the daemon.
+        MenuItem("Play chime on reset", _on_toggle_chime, checked=lambda _item: read_chime_setting() == "on"),
         MenuItem("Quit", _on_quit),
     )
 

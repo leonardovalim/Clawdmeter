@@ -133,6 +133,30 @@ def read_chime_setting() -> str:
     return "off"
 
 
+def write_chime_setting(value: str) -> None:
+    """Persist the `chime` option (on/off) to CONFIG_FILE.
+
+    Rewrites the existing `chime = ...` line in place if present, appends it
+    otherwise. All other lines (comments, `clock`, etc.) are preserved
+    verbatim so the tray toggle never clobbers settings edited by hand. The
+    daemon re-reads CONFIG_FILE every poll, so the change takes effect within
+    ~60s with no restart (see read_chime_setting).
+    """
+    value = "on" if value == "on" else "off"
+    lines = CONFIG_FILE.read_text().splitlines() if CONFIG_FILE.exists() else []
+
+    for i, line in enumerate(lines):
+        key = line.split("#", 1)[0].split("=", 1)[0].strip().lower()
+        if key == "chime":
+            lines[i] = f"chime = {value}"
+            break
+    else:
+        lines.append(f"chime = {value}")
+
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text("\n".join(lines) + "\n")
+
+
 def read_clock_setting() -> str:
     """Read the `clock` option from the config file. One of: off|auto|12|24.
 

@@ -102,6 +102,30 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
+// ---- Stats screen (SCREEN_STATS) ----
+static lv_obj_t* stats_container    = nullptr;
+static lv_obj_t* arc_cache          = nullptr;
+static lv_obj_t* lbl_cache_pct      = nullptr;
+static lv_obj_t* lbl_cache_sub      = nullptr;
+static lv_obj_t* heatmap_fill[24]   = {};
+static int       hm_bar_max_h       = 0;
+
+// ---- Media screen (SCREEN_MEDIA) ----
+static lv_obj_t* media_container    = nullptr;
+static lv_obj_t* lbl_media_nothing  = nullptr;
+static lv_obj_t* lbl_media_artist   = nullptr;
+static lv_obj_t* lbl_media_title    = nullptr;
+static lv_obj_t* lbl_media_status   = nullptr;
+
+// ---- Burndown screen (SCREEN_BURNDOWN) ----
+static lv_obj_t* burndown_container = nullptr;
+static lv_obj_t* lbl_bd_todo        = nullptr;
+static lv_obj_t* lbl_bd_doing       = nullptr;
+static lv_obj_t* lbl_bd_done        = nullptr;
+static lv_obj_t* bar_bd             = nullptr;  // sprint completion bar
+static lv_obj_t* lbl_bd_pct         = nullptr;
+static lv_obj_t* lbl_bd_nothing     = nullptr;
+
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
 static lv_obj_t* lbl_title;
@@ -432,13 +456,218 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
+    // lbl_anim is created at the screen level in ui_init() so it floats
+    // above all content screens (except splash).
+}
 
-    // Status line — always visible on the usage view. Driven by ui_tick_anim().
-    lbl_anim = lv_label_create(usage_container);
-    lv_label_set_text(lbl_anim, "");
-    lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
-    lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+// ======== Stats screen ========
+
+static void update_heatmap_bars(const UsageData* data) {
+    if (!heatmap_fill[0] || hm_bar_max_h == 0) return;
+    for (int i = 0; i < 24; i++) {
+        int val      = data->hourly[i];
+        int fill_h   = (hm_bar_max_h * val) / 100;
+        lv_obj_set_height(heatmap_fill[i], fill_h);
+        lv_obj_set_y(heatmap_fill[i], hm_bar_max_h - fill_h);
+        lv_color_t col = (val == 0) ? COL_BAR_BG :
+                         (val >= 80) ? COL_RED    :
+                         (val >= 50) ? COL_AMBER  : COL_GREEN;
+        lv_obj_set_style_bg_color(heatmap_fill[i], col, 0);
+    }
+}
+
+static void init_stats_screen(lv_obj_t* scr) {
+    stats_container = lv_obj_create(scr);
+    lv_obj_set_size(stats_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(stats_container, 0, 0);
+    lv_obj_set_style_bg_color(stats_container, COL_BG, 0);
+    lv_obj_set_style_bg_opa(stats_container, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(stats_container, 0, 0);
+    lv_obj_set_style_pad_all(stats_container, 0, 0);
+    lv_obj_clear_flag(stats_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(stats_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(stats_container, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t* title = lv_label_create(stats_container);
+    lv_label_set_text(title, "Stats");
+    lv_obj_set_style_text_font(title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, L.title_y);
+
+    // Cache hit ring — ¾ circle, fills clockwise from bottom-left
+    arc_cache = lv_arc_create(stats_container);
+    lv_obj_set_size(arc_cache, 180, 180);
+    lv_obj_align(arc_cache, LV_ALIGN_TOP_MID, 0, 90);
+    lv_arc_set_rotation(arc_cache, 135);
+    lv_arc_set_bg_angles(arc_cache, 0, 270);
+    lv_arc_set_range(arc_cache, 0, 100);
+    lv_arc_set_value(arc_cache, 0);
+    lv_obj_set_style_arc_color(arc_cache, COL_BAR_BG, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc_cache, 16, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc_cache, COL_GREEN, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(arc_cache, 16, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(arc_cache, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(arc_cache, 0, LV_PART_KNOB);
+    lv_obj_clear_flag(arc_cache, LV_OBJ_FLAG_CLICKABLE);
+
+    lbl_cache_pct = lv_label_create(stats_container);
+    lv_label_set_text(lbl_cache_pct, "--");
+    lv_obj_set_style_text_font(lbl_cache_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(lbl_cache_pct, COL_TEXT, 0);
+    lv_obj_align_to(lbl_cache_pct, arc_cache, LV_ALIGN_CENTER, 0, -8);
+
+    lbl_cache_sub = lv_label_create(stats_container);
+    lv_label_set_text(lbl_cache_sub, "cache hits");
+    lv_obj_set_style_text_font(lbl_cache_sub, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(lbl_cache_sub, COL_DIM, 0);
+    lv_obj_align_to(lbl_cache_sub, arc_cache, LV_ALIGN_CENTER, 0, 28);
+
+    // 24-hour activity heatmap
+    const int hm_y = 295, hm_h = 110;
+    lv_obj_t* hm_panel = make_panel(stats_container, L.margin, hm_y, L.content_w, hm_h);
+    lv_obj_set_style_pad_all(hm_panel, 8, 0);
+    lv_obj_clear_flag(hm_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    const int bar_w = (L.content_w - 16) / 24;
+    hm_bar_max_h = hm_h - 16;
+
+    for (int i = 0; i < 24; i++) {
+        lv_obj_t* bg = lv_obj_create(hm_panel);
+        lv_obj_set_size(bg, bar_w - 2, hm_bar_max_h);
+        lv_obj_set_pos(bg, i * bar_w, 0);
+        lv_obj_set_style_bg_color(bg, COL_BAR_BG, 0);
+        lv_obj_set_style_bg_opa(bg, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(bg, 0, 0);
+        lv_obj_set_style_radius(bg, 2, 0);
+        lv_obj_set_style_pad_all(bg, 0, 0);
+        lv_obj_clear_flag(bg, LV_OBJ_FLAG_SCROLLABLE);
+
+        heatmap_fill[i] = lv_obj_create(bg);
+        lv_obj_set_size(heatmap_fill[i], bar_w - 2, 0);
+        lv_obj_set_pos(heatmap_fill[i], 0, hm_bar_max_h);
+        lv_obj_set_style_bg_color(heatmap_fill[i], COL_DIM, 0);
+        lv_obj_set_style_bg_opa(heatmap_fill[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(heatmap_fill[i], 0, 0);
+        lv_obj_set_style_radius(heatmap_fill[i], 2, 0);
+        lv_obj_clear_flag(heatmap_fill[i], LV_OBJ_FLAG_SCROLLABLE);
+    }
+}
+
+// ======== Media screen ========
+
+static void init_media_screen(lv_obj_t* scr) {
+    media_container = lv_obj_create(scr);
+    lv_obj_set_size(media_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(media_container, 0, 0);
+    lv_obj_set_style_bg_color(media_container, COL_BG, 0);
+    lv_obj_set_style_bg_opa(media_container, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(media_container, 0, 0);
+    lv_obj_set_style_pad_all(media_container, 0, 0);
+    lv_obj_clear_flag(media_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(media_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(media_container, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t* title = lv_label_create(media_container);
+    lv_label_set_text(title, "Now Playing");
+    lv_obj_set_style_text_font(title, &font_tiempos_34, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, L.title_y);
+
+    lbl_media_nothing = lv_label_create(media_container);
+    lv_label_set_text(lbl_media_nothing, "Nothing playing");
+    lv_obj_set_style_text_font(lbl_media_nothing, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_media_nothing, COL_DIM, 0);
+    lv_obj_align(lbl_media_nothing, LV_ALIGN_CENTER, 0, 0);
+
+    lbl_media_artist = lv_label_create(media_container);
+    lv_label_set_text(lbl_media_artist, "");
+    lv_obj_set_style_text_font(lbl_media_artist, &font_styrene_48, 0);
+    lv_obj_set_style_text_color(lbl_media_artist, COL_TEXT, 0);
+    lv_label_set_long_mode(lbl_media_artist, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(lbl_media_artist, L.content_w);
+    lv_obj_align(lbl_media_artist, LV_ALIGN_TOP_MID, 0, 165);
+    lv_obj_add_flag(lbl_media_artist, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_media_title = lv_label_create(media_container);
+    lv_label_set_text(lbl_media_title, "");
+    lv_obj_set_style_text_font(lbl_media_title, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_media_title, COL_DIM, 0);
+    lv_label_set_long_mode(lbl_media_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(lbl_media_title, L.content_w);
+    lv_obj_align(lbl_media_title, LV_ALIGN_TOP_MID, 0, 235);
+    lv_obj_add_flag(lbl_media_title, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_media_status = lv_label_create(media_container);
+    lv_label_set_text(lbl_media_status, "");
+    lv_obj_set_style_text_font(lbl_media_status, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(lbl_media_status, COL_ACCENT, 0);
+    lv_obj_align(lbl_media_status, LV_ALIGN_TOP_MID, 0, 305);
+    lv_obj_add_flag(lbl_media_status, LV_OBJ_FLAG_HIDDEN);
+}
+
+// ======== Burndown screen ========
+
+static void init_burndown_screen(lv_obj_t* scr) {
+    burndown_container = lv_obj_create(scr);
+    lv_obj_set_size(burndown_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(burndown_container, 0, 0);
+    lv_obj_set_style_bg_color(burndown_container, COL_BG, 0);
+    lv_obj_set_style_bg_opa(burndown_container, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(burndown_container, 0, 0);
+    lv_obj_set_style_pad_all(burndown_container, 0, 0);
+    lv_obj_clear_flag(burndown_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(burndown_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(burndown_container, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t* title = lv_label_create(burndown_container);
+    lv_label_set_text(title, "Sprint");
+    lv_obj_set_style_text_font(title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, L.title_y);
+
+    lbl_bd_nothing = lv_label_create(burndown_container);
+    lv_label_set_text(lbl_bd_nothing, "No sprint data");
+    lv_obj_set_style_text_font(lbl_bd_nothing, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_bd_nothing, COL_DIM, 0);
+    lv_obj_align(lbl_bd_nothing, LV_ALIGN_CENTER, 0, 0);
+
+    // Three columns: To Do / Doing / Done
+    const int col_w  = (L.content_w - 8) / 3;
+    const int col_y  = 110;
+    const int col_h  = 180;
+    const char* labels[3] = {"To Do", "Doing", "Done"};
+    lv_color_t  colors[3] = {COL_DIM, COL_AMBER, COL_GREEN};
+    lv_obj_t**  ptrs[3]   = {&lbl_bd_todo, &lbl_bd_doing, &lbl_bd_done};
+
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t* panel = make_panel(burndown_container,
+                                     L.margin + i * (col_w + 4), col_y, col_w, col_h);
+
+        lv_obj_t* count = lv_label_create(panel);
+        lv_label_set_text(count, "--");
+        lv_obj_set_style_text_font(count, &font_tiempos_56, 0);
+        lv_obj_set_style_text_color(count, colors[i], 0);
+        lv_obj_align(count, LV_ALIGN_TOP_MID, 0, 16);
+        *ptrs[i] = count;
+
+        lv_obj_t* lbl = lv_label_create(panel);
+        lv_label_set_text(lbl, labels[i]);
+        lv_obj_set_style_text_font(lbl, &font_styrene_16, 0);
+        lv_obj_set_style_text_color(lbl, COL_DIM, 0);
+        lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -8);
+    }
+
+    // Sprint completion bar
+    bar_bd = make_bar(burndown_container, L.margin, 315, L.content_w, 24);
+
+    lbl_bd_pct = lv_label_create(burndown_container);
+    lv_label_set_text(lbl_bd_pct, "");
+    lv_obj_set_style_text_font(lbl_bd_pct, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(lbl_bd_pct, COL_DIM, 0);
+    lv_obj_align(lbl_bd_pct, LV_ALIGN_TOP_MID, 0, 350);
+
+    lv_obj_add_flag(bar_bd,     LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lbl_bd_pct, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ======== Public API ========
@@ -454,6 +683,9 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
+    init_stats_screen(scr);
+    init_media_screen(scr);
+    init_burndown_screen(scr);
     splash_init(scr);
 
     if (splash_get_root()) {
@@ -480,6 +712,15 @@ void ui_init(void) {
     // and hidden by the bezel, so anything hugging the literal corner never
     // reaches the eye even though it's in the framebuffer (see CLAUDE.md).
     lv_obj_align(lbl_version, LV_ALIGN_BOTTOM_RIGHT, -L.margin, -L.margin);
+
+    // Animated status line — lives at the screen level so it floats on top of
+    // all content screens. Hidden on SCREEN_SPLASH, shown everywhere else.
+    lbl_anim = lv_label_create(scr);
+    lv_label_set_text(lbl_anim, "");
+    lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
+    lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
+    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
 }
 
 void ui_update(const UsageData* data) {
@@ -563,6 +804,70 @@ void ui_update(const UsageData* data) {
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
     }
+
+    // ---- Stats screen ----
+    if (arc_cache) {
+        if (data->cache_hit_pct >= 0) {
+            lv_arc_set_value(arc_cache, data->cache_hit_pct);
+            lv_color_t col = (data->cache_hit_pct >= 70) ? COL_GREEN :
+                             (data->cache_hit_pct >= 40) ? COL_AMBER : COL_RED;
+            lv_obj_set_style_arc_color(arc_cache, col, LV_PART_INDICATOR);
+            snprintf(buf, sizeof(buf), "%d%%", data->cache_hit_pct);
+            lv_label_set_text(lbl_cache_pct, buf);
+        } else {
+            lv_arc_set_value(arc_cache, 0);
+            lv_label_set_text(lbl_cache_pct, "--");
+        }
+    }
+    update_heatmap_bars(data);
+
+    // ---- Media screen ----
+    if (media_container) {
+        if (data->has_media) {
+            lv_obj_add_flag(lbl_media_nothing, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_media_artist, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_media_title,  LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_media_status, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(lbl_media_artist, data->media_artist);
+            lv_label_set_text(lbl_media_title,  data->media_title);
+            lv_label_set_text(lbl_media_status, data->media_playing ? "Playing" : "Paused");
+            lv_obj_set_style_text_color(lbl_media_status,
+                data->media_playing ? COL_GREEN : COL_DIM, 0);
+        } else {
+            lv_obj_clear_flag(lbl_media_nothing, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_media_artist,    LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_media_title,     LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_media_status,    LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    // ---- Burndown screen ----
+    if (burndown_container) {
+        if (data->has_burndown) {
+            lv_obj_add_flag(lbl_bd_nothing, LV_OBJ_FLAG_HIDDEN);
+            snprintf(buf, sizeof(buf), "%d", data->bd_todo);
+            lv_label_set_text(lbl_bd_todo,  buf);
+            snprintf(buf, sizeof(buf), "%d", data->bd_doing);
+            lv_label_set_text(lbl_bd_doing, buf);
+            snprintf(buf, sizeof(buf), "%d", data->bd_done);
+            lv_label_set_text(lbl_bd_done,  buf);
+            int total    = data->bd_total > 0 ? data->bd_total : 1;
+            int done_pct = (data->bd_done * 100) / total;
+            lv_obj_clear_flag(bar_bd,     LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_bd_pct, LV_OBJ_FLAG_HIDDEN);
+            lv_bar_set_value(bar_bd, done_pct, LV_ANIM_ON);
+            lv_obj_set_style_bg_color(bar_bd, pct_color((float)done_pct), LV_PART_INDICATOR);
+            snprintf(buf, sizeof(buf), "%d%% complete", done_pct);
+            lv_label_set_text(lbl_bd_pct, buf);
+        } else {
+            lv_obj_clear_flag(lbl_bd_nothing, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(lbl_bd_todo,  "--");
+            lv_label_set_text(lbl_bd_doing, "--");
+            lv_label_set_text(lbl_bd_done,  "--");
+            lv_obj_add_flag(bar_bd,     LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_bd_pct, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
@@ -589,15 +894,18 @@ static void update_view_state(void) {
 }
 
 void ui_tick_anim(void) {
-    if (current_screen != SCREEN_USAGE) return;
-    update_view_state();
-    if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
+    // Usage-specific sub-screen management (pair hint / idle / live panels)
+    if (current_screen == SCREEN_USAGE) {
+        update_view_state();
+        if (view_state == 1) splash_mini_tick();
+    }
+    // No animated status line on the splash screen.
+    if (current_screen == SCREEN_SPLASH) return;
 
     uint32_t now = lv_tick_get();
 
-    // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
-    // the live time, advanced locally so it ticks every minute between payloads.
-    if (clock_base_epoch > 0) {
+    // Title clock only applies to the usage screen (has its own lbl_title).
+    if (current_screen == SCREEN_USAGE && clock_base_epoch > 0) {
         time_t cur = (time_t)(clock_base_epoch + (now - clock_base_ms) / 1000);
         struct tm tmv;
         gmtime_r(&cur, &tmv);   // epoch is already local wall-clock → gmtime keeps it as-is
@@ -630,8 +938,8 @@ void ui_tick_anim(void) {
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
     if (!s_ble_connected) {
-        text = "Waiting";              // advertising / waiting for a host connection
-    } else if (view_state == 1) {      // idle — alternate so it reads as alive AND data-less
+        text = "Waiting";
+    } else if (current_screen == SCREEN_USAGE && view_state == 1) {
         text = (anim_msg_idx & 1) ? "No data" : "Listening";
     } else if (now - connected_at_ms < 5000) {
         text = "Connected";
@@ -660,14 +968,35 @@ static void global_click_cb(lv_event_t* e) {
 }
 
 void ui_show_screen(screen_t screen) {
+    // Hide all content containers
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    if (stats_container)    lv_obj_add_flag(stats_container,    LV_OBJ_FLAG_HIDDEN);
+    if (media_container)    lv_obj_add_flag(media_container,    LV_OBJ_FLAG_HIDDEN);
+    if (burndown_container) lv_obj_add_flag(burndown_container, LV_OBJ_FLAG_HIDDEN);
+    if (lbl_anim)           lv_obj_add_flag(lbl_anim,           LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
-    case SCREEN_SPLASH:  splash_show(); break;
-    case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_SPLASH:
+        splash_show();
+        break;
+    case SCREEN_USAGE:
+        lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+        break;
+    case SCREEN_STATS:
+        if (stats_container)    lv_obj_clear_flag(stats_container,    LV_OBJ_FLAG_HIDDEN);
+        break;
+    case SCREEN_MEDIA:
+        if (media_container)    lv_obj_clear_flag(media_container,    LV_OBJ_FLAG_HIDDEN);
+        break;
+    case SCREEN_BURNDOWN:
+        if (burndown_container) lv_obj_clear_flag(burndown_container, LV_OBJ_FLAG_HIDDEN);
+        break;
     default: break;
     }
+
+    if (screen != SCREEN_SPLASH && lbl_anim)
+        lv_obj_clear_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
 
     if (logo_img) {
         if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);

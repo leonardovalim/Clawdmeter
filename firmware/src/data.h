@@ -16,4 +16,21 @@ struct UsageData {
     int  clock_fmt;          // 12 or 24 (hour format from daemon); defaults to 24
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
+
+    // Stats screen (SCREEN_STATS)
+    int     cache_hit_pct;   // 0-100; -1 = no data yet
+    uint8_t hourly[24];      // peak session_pct per hour today (0-100)
+
+    // Media screen (SCREEN_MEDIA)
+    char media_title[48];
+    char media_artist[32];
+    bool media_playing;
+    bool has_media;
+
+    // Burndown screen (SCREEN_BURNDOWN)
+    uint8_t bd_todo;         // open tasks
+    uint8_t bd_doing;        // in-progress tasks
+    uint8_t bd_done;         // completed this sprint
+    uint8_t bd_total;        // total sprint tasks
+    bool    has_burndown;
 };

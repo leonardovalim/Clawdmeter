@@ -5,6 +5,9 @@
 enum screen_t {
     SCREEN_SPLASH,
     SCREEN_USAGE,
+    SCREEN_MEDIA,       // landscape right  (quadrant 1): now playing
+    SCREEN_STATS,       // upside-down      (quadrant 2): cache ring + heatmap
+    SCREEN_BURNDOWN,    // landscape left   (quadrant 3): Asana sprint board
     SCREEN_COUNT,
 };
 

@@ -46,6 +46,11 @@ RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked r
 # Config lives under the same Clawdmeter dir as daemon.log.
 CONFIG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "config"
 
+ASANA_MCP_URL    = "https://asana-dash.vercel.app/api/mcp"
+ASANA_POLL_SECS  = 300          # poll sprint data every 5 min (changes slowly)
+_asana_cache:     dict | None = None
+_asana_last_poll: float       = 0.0
+
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
@@ -56,8 +61,17 @@ API_HEADERS_TEMPLATE = {
 API_BODY = {
     "model": "claude-haiku-4-5-20251001",
     "max_tokens": 1,
+    "system": [
+        {
+            "type": "text",
+            "text": "Usage monitor probe.",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ],
     "messages": [{"role": "user", "content": "hi"}],
 }
+
+HEATMAP_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "heatmap.json"
 
 
 def _build_file_logger() -> logging.Logger | None:
@@ -207,6 +221,126 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+def _cache_hit_from_resp(resp) -> int:
+    """Return cache hit % (0-100) from the probe response body, or -1 if unavailable."""
+    try:
+        u = resp.json().get("usage", {})
+        cache_read   = int(u.get("cache_read_input_tokens",   0) or 0)
+        cache_create = int(u.get("cache_creation_input_tokens", 0) or 0)
+        inp          = int(u.get("input_tokens", 0) or 0)
+        total = cache_read + cache_create + inp
+        return round(cache_read * 100 / total) if total > 0 else -1
+    except Exception:
+        return -1
+
+
+def _load_heatmap() -> list[int]:
+    today = datetime.date.today().isoformat()
+    try:
+        raw = json.loads(HEATMAP_FILE.read_text(encoding="utf-8"))
+        h = raw.get("hourly", [])
+        if raw.get("date") == today and isinstance(h, list) and len(h) == 24:
+            return list(h)
+    except Exception:
+        pass
+    return [0] * 24
+
+
+def _update_heatmap(session_pct: int) -> list[int]:
+    """Track peak session utilization per hour; returns the 24-entry array."""
+    hourly = _load_heatmap()
+    hour = datetime.datetime.now().hour
+    hourly[hour] = max(hourly[hour], max(0, min(100, session_pct)))
+    try:
+        HEATMAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HEATMAP_FILE.write_text(
+            json.dumps({"date": datetime.date.today().isoformat(), "hourly": hourly}),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    return hourly
+
+
+async def _get_media_info() -> dict | None:
+    """Return {t, a, p} from Windows GlobalSystemMediaTransportControls, or None."""
+    if sys.platform != "win32":
+        return None
+    try:
+        from winsdk.windows.media.control import (  # type: ignore[import]
+            GlobalSystemMediaTransportControlsSessionManager as GSM,
+        )
+        mgr     = await GSM.request_async()
+        session = mgr.get_current_session()
+        if not session:
+            return None
+        props = await session.try_get_media_properties_async()
+        if not props:
+            return None
+        pb = session.get_playback_info()
+        # MediaPlaybackStatus: Closed=0, Changing=1, Stopped=2, Playing=3, Paused=4
+        playing = pb is not None and getattr(pb, "playback_status", None) == 3
+        return {
+            "t": (props.title  or "")[:47],
+            "a": (props.artist or "")[:31],
+            "p": 1 if playing else 0,
+        }
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def _read_asana_token() -> str | None:
+    """Read asana_token from the Clawdmeter config file, or from env ASANA_TOKEN."""
+    env = os.environ.get("ASANA_TOKEN", "").strip()
+    if env:
+        return env
+    try:
+        for line in CONFIG_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            if key.strip().lower() == "asana_token":
+                v = val.strip()
+                return v if v else None
+    except Exception:
+        pass
+    return None
+
+
+async def _fetch_sprint(asana_token: str) -> dict | None:
+    """Call the Asana MCP get_sprint tool and return {td, dg, dn, tt}, or None."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "get_sprint", "arguments": {"offset": 0}},
+    }
+    headers = {
+        "Authorization": f"Bearer {asana_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.post(ASANA_MCP_URL, headers=headers, json=payload)
+        if resp.status_code != 200:
+            log(f"Asana MCP HTTP {resp.status_code}")
+            return None
+        for line in resp.text.splitlines():
+            if not line.startswith("data: "):
+                continue
+            sc = json.loads(line[6:]).get("result", {}).get("structuredContent", {})
+            if sc:
+                td, dg, dn = sc.get("todo", 0), sc.get("doing", 0), sc.get("done", 0)
+                return {"td": td, "dg": dg, "dn": dn, "tt": td + dg + dn}
+    except Exception as e:
+        log(f"Asana poll error: {e}")
+    return None
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -270,6 +404,27 @@ async def poll_api(token: str) -> dict | None:
         }
     add_chime_field(payload)   # adds "c":1 iff the config opts in
     add_clock_fields(payload)   # adds "t" + "tf" iff the config opts in
+
+    payload["ch"] = _cache_hit_from_resp(resp)
+    payload["hm"] = _update_heatmap(payload.get("s", 0))
+
+    mi = await _get_media_info()
+    if mi is not None:
+        payload["mi"] = mi
+
+    # Burndown (Asana sprint) — polled every ASANA_POLL_SECS, cached between polls.
+    global _asana_cache, _asana_last_poll
+    now_ts = time.time()
+    if now_ts - _asana_last_poll >= ASANA_POLL_SECS:
+        asana_tok = _read_asana_token()
+        if asana_tok:
+            bd = await _fetch_sprint(asana_tok)
+            if bd is not None:
+                _asana_cache = bd
+        _asana_last_poll = now_ts
+    if _asana_cache is not None:
+        payload["bd"] = _asana_cache
+
     return payload
 
 

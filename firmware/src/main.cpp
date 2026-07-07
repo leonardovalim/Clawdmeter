@@ -120,6 +120,43 @@ static bool parse_json(const char* json, UsageData* out) {
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;
+
+    // Stats screen
+    out->cache_hit_pct = doc["ch"] | -1;
+    JsonArray hm = doc["hm"];
+    if (hm) {
+        for (int i = 0; i < 24; i++) out->hourly[i] = hm[i] | 0;
+    } else {
+        memset(out->hourly, 0, sizeof(out->hourly));
+    }
+
+    // Media screen
+    JsonObject mi = doc["mi"];
+    if (mi) {
+        out->has_media = true;
+        strlcpy(out->media_title,  mi["t"] | "", sizeof(out->media_title));
+        strlcpy(out->media_artist, mi["a"] | "", sizeof(out->media_artist));
+        out->media_playing = (mi["p"] | 0) == 1;
+    } else {
+        out->has_media = false;
+        out->media_title[0]  = '\0';
+        out->media_artist[0] = '\0';
+        out->media_playing   = false;
+    }
+
+    // Burndown screen
+    JsonObject bd = doc["bd"];
+    if (bd) {
+        out->has_burndown = true;
+        out->bd_todo  = bd["td"] | 0;
+        out->bd_doing = bd["dg"] | 0;
+        out->bd_done  = bd["dn"] | 0;
+        out->bd_total = bd["tt"] | 0;
+    } else {
+        out->has_burndown = false;
+        out->bd_todo = out->bd_doing = out->bd_done = out->bd_total = 0;
+    }
+
     out->valid = true;
     return true;
 }
@@ -239,6 +276,22 @@ void setup() {
 
 static ble_state_t last_ble_state = BLE_STATE_INIT;
 
+// Map the IMU rotation quadrant to a screen. Runs every loop after imu_hal_tick().
+// Quadrant → screen: 0 portrait=Usage, 1 landscape-right=Media,
+//                    2 upside-down=Stats, 3 landscape-left=Burndown.
+// Ignored while on SCREEN_SPLASH so the boot animation survives a tilted desk.
+static void imu_screen_tick(void) {
+    if (ui_get_current_screen() == SCREEN_SPLASH) return;
+    static uint8_t last_q = 255;
+    uint8_t q = imu_hal_rotation_quadrant();
+    if (q == last_q || q > 3) return;
+    last_q = q;
+    static const screen_t qmap[4] = {
+        SCREEN_USAGE, SCREEN_MEDIA, SCREEN_STATS, SCREEN_BURNDOWN
+    };
+    ui_show_screen(qmap[q]);
+}
+
 // Hold-to-pair gesture: hold the PWR button ~3s, then RELEASE → clear all BLE
 // bonds and re-advertise. Clearing on *release* (not while held) is deliberate:
 // holding to power the device OFF (AXP hardware shutdown at 8s) must not wipe
@@ -292,6 +345,7 @@ void loop() {
     ble_tick();
     power_hal_tick();
     imu_hal_tick();
+    imu_screen_tick();
     sound_hal_tick();
     splash_tick();
     // Rotation transition (blank + ramp) would fight the idle fade — skip

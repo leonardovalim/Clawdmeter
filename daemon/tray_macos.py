@@ -230,6 +230,23 @@ def main() -> None:
                 _icon.update_menu()
             time.sleep(1.0)
 
+    # Run as a menu-bar-only accessory: no Dock icon, no app-switcher entry —
+    # the tray lives purely next to the clock in the status bar. pystray's
+    # backend leaves the NSApplication at the default .regular policy (which
+    # shows a Dock icon), so we flip it to .accessory here. This must happen on
+    # the main thread before the run loop starts, which is exactly where we are
+    # (main() is the process entry point). No-op / best-effort off macOS.
+    try:
+        from AppKit import (
+            NSApplication,
+            NSApplicationActivationPolicyAccessory,
+        )
+        NSApplication.sharedApplication().setActivationPolicy_(
+            NSApplicationActivationPolicyAccessory
+        )
+    except Exception:  # pragma: no cover - non-macOS / missing pyobjc
+        pass
+
     # Blocks the main thread until icon.stop() is called from _on_quit.
     icon.run(setup=_refresh)
 

@@ -38,9 +38,18 @@ def _plist_xml(tray_script: str) -> str:
 
     RunAtLoad=true starts it at login; KeepAlive is intentionally omitted so a
     user Quit from the tray menu stays quit (launchd won't respawn it).
+
+    StandardOutPath/StandardErrorPath capture the daemon's [HH:MM:SS] log and
+    any startup traceback. Without them a login-time failure is invisible
+    (launchd discards a GUI agent's stdio), so "the tray just isn't there" has
+    no evidence trail. Logs land in ~/Library/Logs/ — the conventional per-user
+    spot, readable in Console.app.
     """
     python = sys.executable
     script = os.path.abspath(tray_script)
+    log_dir = Path.home() / "Library" / "Logs"
+    out_log = log_dir / "Clawdmeter-tray.out.log"
+    err_log = log_dir / "Clawdmeter-tray.err.log"
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -58,6 +67,10 @@ def _plist_xml(tray_script: str) -> str:
         "    <true/>\n"
         "    <key>ProcessType</key>\n"
         "    <string>Interactive</string>\n"
+        "    <key>StandardOutPath</key>\n"
+        f"    <string>{out_log}</string>\n"
+        "    <key>StandardErrorPath</key>\n"
+        f"    <string>{err_log}</string>\n"
         "</dict>\n"
         "</plist>\n"
     )

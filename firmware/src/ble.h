@@ -24,3 +24,9 @@ void ble_request_refresh(void);
 // BLE HID keyboard
 void ble_keyboard_press(uint8_t key, uint8_t modifier);
 void ble_keyboard_release(void);
+
+// BLE HID consumer control (media keys) — one-shot tap, no press/release pair
+// needed since these are triggered by discrete touch gestures, not held buttons.
+void ble_media_play_pause(void);
+void ble_media_next_track(void);
+void ble_media_prev_track(void);

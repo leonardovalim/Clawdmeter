@@ -53,11 +53,39 @@ static const uint8_t HID_REPORT_MAP[] = {
     0x29, 0x65,  //   Usage Maximum (101)
     0x81, 0x00,  //   Input (Data, Array) - Key array (6 keys)
     0xC0,        // End Collection
+
+    // Consumer Control collection — standard media keys (Play/Pause, Next,
+    // Previous). A second, independent report on the same HID device; macOS/
+    // Windows route these to whichever app currently owns the Now Playing
+    // session (Spotify, Music, etc.), same as a physical Bluetooth remote.
+    0x05, 0x0C,  // Usage Page (Consumer)
+    0x09, 0x01,  // Usage (Consumer Control)
+    0xA1, 0x01,  // Collection (Application)
+    0x85, 0x02,  //   Report ID (2)
+    0x15, 0x00,  //   Logical Minimum (0)
+    0x25, 0x01,  //   Logical Maximum (1)
+    0x75, 0x01,  //   Report Size (1)
+    0x95, 0x03,  //   Report Count (3)
+    0x09, 0xCD,  //   Usage (Play/Pause)
+    0x09, 0xB5,  //   Usage (Scan Next Track)
+    0x09, 0xB6,  //   Usage (Scan Previous Track)
+    0x81, 0x02,  //   Input (Data, Variable, Absolute)
+    0x95, 0x05,  //   Report Count (5) - padding to fill the byte
+    0x75, 0x01,  //   Report Size (1)
+    0x81, 0x03,  //   Input (Constant, Variable, Absolute)
+    0xC0,        // End Collection
 };
+
+// Consumer Control usage bits (bit position within the single report byte,
+// matches the field order declared in HID_REPORT_MAP above).
+#define MEDIA_BIT_PLAY_PAUSE 0x01
+#define MEDIA_BIT_NEXT_TRACK 0x02
+#define MEDIA_BIT_PREV_TRACK 0x04
 
 static NimBLEServer* server = nullptr;
 static NimBLEHIDDevice* hid_dev = nullptr;
 static NimBLECharacteristic* input_kbd = nullptr;
+static NimBLECharacteristic* input_media = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
@@ -281,11 +309,13 @@ void ble_init(void) {
     hid_dev->setPnp(0x01, 0x02E5, 0x0001, 0x0100);
     // country=33 (US ANSI). Setting this to 0 ("not supported") causes macOS
     // to launch the Keyboard Setup Assistant on first pair asking the user
-    // to identify the layout — we only ever send Space / Shift+Tab so the
-    // physical layout is irrelevant; advertise a known one to skip the wizard.
+    // to identify the layout — we only ever send a handful of fixed keys
+    // (Space, Shift+Tab, media keys) so the physical layout is irrelevant;
+    // advertise a known one to skip the wizard.
     hid_dev->setHidInfo(33, 0x02);
     hid_dev->setBatteryLevel(100);
-    input_kbd = hid_dev->getInputReport(1);  // report ID 1
+    input_kbd   = hid_dev->getInputReport(1);  // report ID 1 — keyboard
+    input_media = hid_dev->getInputReport(2);  // report ID 2 — consumer control
 
     // --- Custom data service ---
     NimBLEService* svc = server->createService(SERVICE_UUID);
@@ -395,3 +425,17 @@ void ble_keyboard_release(void) {
     input_kbd->setValue(report, sizeof(report));
     input_kbd->notify();
 }
+
+static void ble_media_key_tap(uint8_t bit) {
+    if (state != BLE_STATE_CONNECTED || !input_media) return;
+    uint8_t report = bit;
+    input_media->setValue(&report, 1);
+    input_media->notify();
+    report = 0;
+    input_media->setValue(&report, 1);
+    input_media->notify();
+}
+
+void ble_media_play_pause(void)  { ble_media_key_tap(MEDIA_BIT_PLAY_PAUSE); }
+void ble_media_next_track(void)  { ble_media_key_tap(MEDIA_BIT_NEXT_TRACK); }
+void ble_media_prev_track(void)  { ble_media_key_tap(MEDIA_BIT_PREV_TRACK); }

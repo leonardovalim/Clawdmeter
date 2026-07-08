@@ -6,6 +6,7 @@
 #include "icons.h"
 #include "hal/board_caps.h"
 #include "version.h"
+#include "ble.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -249,6 +250,8 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
+static void media_tap_cb(lv_event_t* e);
+static void media_gesture_cb(lv_event_t* e);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -564,7 +567,12 @@ static void init_media_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(media_container, 0, 0);
     lv_obj_set_style_pad_all(media_container, 0, 0);
     lv_obj_clear_flag(media_container, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(media_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+    // Media screen overrides the usual tap-to-splash behavior: tap toggles
+    // play/pause, swipe left/right skips tracks — sent as BLE HID consumer-
+    // control keys (see ble.cpp). Getting to another screen still works via
+    // tilting back to portrait, same as reaching this screen in the first place.
+    lv_obj_add_event_cb(media_container, media_tap_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(media_container, media_gesture_cb, LV_EVENT_GESTURE, NULL);
     lv_obj_add_flag(media_container, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t* title = lv_label_create(media_container);
@@ -965,6 +973,20 @@ static void global_click_cb(lv_event_t* e) {
     (void)e;
     if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
     else                                  ui_show_screen(SCREEN_SPLASH);
+}
+
+static void media_tap_cb(lv_event_t* e) {
+    (void)e;
+    ble_media_play_pause();
+}
+
+static void media_gesture_cb(lv_event_t* e) {
+    (void)e;
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir == LV_DIR_LEFT)       ble_media_next_track();
+    else if (dir == LV_DIR_RIGHT) ble_media_prev_track();
 }
 
 void ui_show_screen(screen_t screen) {

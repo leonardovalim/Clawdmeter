@@ -196,6 +196,28 @@ see `daemon/config.example` — re-read every poll (~60s, no restart needed): `c
 reset" checkbox that reads/writes it (`read_chime_setting`/`write_chime_setting` in
 `claude_usage_daemon_windows.py`) — no hand-editing required.
 
+**macOS operational gotchas (found the hard way):**
+
+- **Stale old-code process holding the single-instance lock.** `tray_macos.py` guards
+  against double-launch with a POSIX `flock` on `~/Library/Caches/Clawdmeter-tray.lock`.
+  If an orphaned tray/daemon from a previous session is still alive (adopted by launchd,
+  PPID 1), a `launchctl kickstart` of the LaunchAgent exits code 0 *immediately* — the new
+  process can't get the lock, so the Mac keeps running **old daemon code** and never picks
+  up a `git pull`. Symptom: kickstart "OK" but no new log lines / stale timestamps. Fix:
+  `lsof ~/Library/Caches/Clawdmeter-tray.lock` to find the PID, `kill` it, then kickstart
+  `gui/$(id -u)/com.clawdmeter.tray`. The lock is kernel-released on death — no file to rm.
+- **Sprint/burndown screen empty ≠ Anthropic token problem.** Usage (`s`/`w`) comes from the
+  Anthropic API; the Sprint screen's `bd` payload field comes from a *separate* Asana
+  dashboard (`asana-dash.vercel.app`) gated on `asana_token` in the config file (or the
+  `ASANA_TOKEN` env var). No token ⇒ daemon silently omits `bd` (no log line) ⇒ device shows
+  "No sprint data". This is documented-expected, not a bug. `_read_asana_token()` /
+  `_fetch_sprint()` in `claude_usage_daemon.py`.
+- **`blueutil` from the terminal is TCC-blocked** ("Received abort signal … absence of access
+  to Bluetooth"). Can't force-connect the peripheral from a shell here. A bonded BLE-HID
+  Clawdmeter shows "Not Connected" in macOS BT until it sends a HID report — press any device
+  button (or Connect in System Settings) to make macOS hold the link; only then does the
+  daemon's `retrieveConnectedPeripheralsWithServices_` see it.
+
 **Discovery & resilience:**
 
 - Connects by name (`"Clawdmeter"`) on first run, caches resolved MAC at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.

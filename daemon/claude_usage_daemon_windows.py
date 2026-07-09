@@ -593,8 +593,11 @@ async def poll_api(token: str) -> dict | None:
         return int(round(mins)) if mins > 0 else 0
 
     def pct(util: str) -> int:
+        # Anthropic's utilization header can read slightly over 1.0 once a
+        # window is exhausted (observed 1.05) — clamp so the device shows a
+        # clean "100%" instead of a confusing "105%".
         try:
-            return int(round(float(util) * 100))
+            return max(0, min(100, int(round(float(util) * 100))))
         except ValueError:
             return 0
 
@@ -1034,6 +1037,22 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                     # toast "token expired" — that mislabeled a boot-time DNS blip
                     # as an auth problem (SC#5). Leave tray state unchanged; the next
                     # tick retries and set_connected() recovers it.
+                    elif cached_payload is not None:
+                        # Resend the last known-good payload as a keep-alive so the
+                        # firmware's freshness clock doesn't expire into "No data"
+                        # while we're most likely still at whatever % we last
+                        # reported (e.g. 100%, exhausted) — mirrors the media-resend
+                        # keep-alive below, but for a failed usage poll.
+                        if not await session.write_payload(cached_payload):
+                            consecutive_failures += 1
+                            if consecutive_failures >= ZOMBIE_BREAK_LIMIT:
+                                log(
+                                    f"Zombie link detected ({consecutive_failures} consecutive"
+                                    f" write failures); abandoning connection"
+                                )
+                                break
+                        elif tray_state:
+                            tray_state.set_connected(time.time())
 
             # Media moves faster than the 60s usage poll (track changes,
             # play/pause, position). Between polls, re-read the media info every

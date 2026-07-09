@@ -566,6 +566,22 @@ async def _osascript(script: str, timeout: float = 5.0):
         return None
 
 
+def _parse_locale_float(s: str) -> float:
+    """Parse a number AppleScript formatted per the system locale.
+
+    `(player position) as text` etc. honour the locale, so on a pt-BR Mac they
+    come back as "134,26" / "1.234,56" (comma decimal, dot thousands) rather
+    than the "134.26" Python's float() expects. Normalize both conventions so
+    position/duration aren't silently dropped by the ValueError handler.
+    """
+    s = s.strip()
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")  # "1.234,56" -> "1234.56"
+    else:
+        s = s.replace(",", ".")                    # "134,26"   -> "134.26"
+    return float(s)
+
+
 async def _get_media_info() -> dict | None:
     """Return {t, a, p[, ps, d]} for the current Spotify/Music track, or None."""
     global _media_app
@@ -589,8 +605,8 @@ async def _get_media_info() -> dict | None:
     # seconds; the firmware interpolates between updates.
     if len(parts) >= 6:
         try:
-            pos = int(float(parts[4]))
-            dur = int(float(parts[5]))
+            pos = int(_parse_locale_float(parts[4]))
+            dur = int(_parse_locale_float(parts[5]))
             if dur > 0:
                 info["ps"] = max(0, pos)
                 info["d"] = dur
@@ -866,8 +882,11 @@ async def poll_api(token: str) -> dict | None:
         return int(round(mins)) if mins > 0 else 0
 
     def pct(util: str) -> int:
+        # Anthropic's utilization header can read slightly over 1.0 once a
+        # window is exhausted (observed 1.05) — clamp so the device shows a
+        # clean "100%" instead of a confusing "105%".
         try:
-            return int(round(float(util) * 100))
+            return max(0, min(100, int(round(float(util) * 100))))
         except ValueError:
             return 0
 
@@ -997,10 +1016,35 @@ class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
         self.refresh_requested = asyncio.Event()
+        # Set after a transport command lands, so the poll loop wakes at once
+        # and pushes the new track/state instead of waiting out the 5s TICK.
+        self.media_dirty = asyncio.Event()
+        self._loop = asyncio.get_running_loop()
 
-    def _on_refresh(self, _char, _data: bytearray) -> None:
-        log("Refresh requested by device")
-        self.refresh_requested.set()
+    def _on_refresh(self, _char, data: bytearray) -> None:
+        # REQ_CHAR carries a one-byte opcode: 0x01 = refresh, 0x1x = transport.
+        code = data[0] if data else 0x01
+        if code == 0x01:
+            log("Refresh requested by device")
+            self.refresh_requested.set()
+            return
+        if code not in (MEDIA_CMD_PLAYPAUSE, MEDIA_CMD_NEXT, MEDIA_CMD_PREV):
+            log(f"Unknown device opcode 0x{code:02x}")
+            return
+        name = {MEDIA_CMD_PLAYPAUSE: "play/pause",
+                MEDIA_CMD_NEXT: "next",
+                MEDIA_CMD_PREV: "prev"}[code]
+        log(f"Media command from device: {name}")
+        # Bleak may invoke this off the loop thread; hop back on before spawning.
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(self._run_media(code))
+        )
+
+    async def _run_media(self, code: int) -> None:
+        if await _media_control(code):
+            # Give the player a beat to apply it, then let the loop re-read.
+            await asyncio.sleep(0.35)
+            self.media_dirty.set()
 
     async def setup_refresh_subscription(self) -> None:
         # start_notify awaits CoreBluetooth's CCCD-write confirmation, which
@@ -1164,6 +1208,8 @@ async def connect_and_run(target, stop_event: asyncio.Event, tray_state=None) ->
 
     last_poll = 0.0
     used_successfully = False
+    cached_payload: dict | None = None
+    art_sent_key: tuple | None = None
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
@@ -1178,16 +1224,65 @@ async def connect_and_run(target, stop_event: asyncio.Event, tray_state=None) ->
                     # a transient network/API failure, which must not toast.
                     if tray_state is not None and not _any_token_available():
                         tray_state.set_error("token expired — run claude login")
+                    elif cached_payload is not None:
+                        # The API poll failed this cycle for some reason we may not
+                        # have a handler for yet (a 429 without utilization headers,
+                        # a non-429 error at full credit/quota exhaustion, a network
+                        # blip). Resend the last known-good payload as a keep-alive
+                        # so the firmware's 90s freshness clock doesn't expire into
+                        # "No data" while we're most likely still sitting at
+                        # whatever % we last reported (e.g. 100%, exhausted).
+                        if await session.write_payload(cached_payload) and tray_state is not None:
+                            tray_state.set_connected(time.time())
                 elif await session.write_payload(payload):
                     last_poll = time.time()
                     used_successfully = True
+                    cached_payload = payload
                     if tray_state is not None:
                         tray_state.set_connected(time.time())
 
+            # Media moves faster than the 60s usage poll (track changes,
+            # play/pause, position). Between polls, re-read the media info every
+            # TICK and resend the cached payload whenever it changed — the
+            # firmware replaces its whole state per message, so the resend must
+            # carry the full usage payload, not just "mi". Mirrors the Windows
+            # daemon's media_dirty block.
+            elif cached_payload is not None:
+                session.media_dirty.clear()
+                mi = await _get_media_info()
+                if mi != cached_payload.get("mi"):
+                    if mi is None:
+                        cached_payload.pop("mi", None)
+                    else:
+                        cached_payload["mi"] = mi
+                    if await session.write_payload(cached_payload) and tray_state is not None:
+                        tray_state.set_connected(time.time())
+
+            # Album art follows the track: whenever the (title, artist) pair
+            # changes, push the new cover (or a clear frame). On failure the key
+            # is left unchanged so the next tick retries.
+            if cached_payload is not None:
+                mi_now = cached_payload.get("mi")
+                key = (mi_now.get("t"), mi_now.get("a")) if mi_now else None
+                if key != art_sent_key:
+                    art = await _fetch_album_art_rgb565() if key is not None else None
+                    if await _send_album_art(session.client, art):
+                        art_sent_key = key
+                        log(f"Album art {'sent' if art else 'cleared'} for {key}")
+
+            # Wake on a refresh request OR a just-applied transport command,
+            # whichever comes first, so media state pushes promptly instead of
+            # waiting out the full TICK.
+            waiters = [
+                asyncio.ensure_future(session.refresh_requested.wait()),
+                asyncio.ensure_future(session.media_dirty.wait()),
+            ]
             try:
-                await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
-            except asyncio.TimeoutError:
-                pass
+                await asyncio.wait(
+                    waiters, timeout=TICK, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for w in waiters:
+                    w.cancel()
     finally:
         try:
             await client.disconnect()

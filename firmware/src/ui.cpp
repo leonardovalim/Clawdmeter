@@ -124,6 +124,9 @@ static lv_obj_t* lbl_media_status   = nullptr;
 static lv_obj_t* bar_media          = nullptr;  // track progress bar
 static lv_obj_t* lbl_media_time     = nullptr;  // "1:23 / 3:16" under the bar
 static lv_obj_t* img_media_art      = nullptr;  // album cover (RGB565 from BLE)
+static lv_obj_t* lbl_zone_prev      = nullptr;  // dim hint marking the tap zones:
+static lv_obj_t* lbl_zone_play      = nullptr;  //  left third = prev, center =
+static lv_obj_t* lbl_zone_next      = nullptr;  //  play/pause, right third = next
 static lv_image_dsc_t media_art_dsc;
 // Track progress interpolation: the daemon refreshes position every ~5s; between
 // updates we advance it locally while playing (same base+tick pattern as the clock).
@@ -269,7 +272,6 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
 static void media_tap_cb(lv_event_t* e);
-static void media_gesture_cb(lv_event_t* e);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -640,13 +642,34 @@ static void init_media_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_media_time, LV_ALIGN_TOP_MID, 0, 392);
     lv_obj_add_flag(lbl_media_time, LV_OBJ_FLAG_HIDDEN);
 
-    // Touch transport: the whole screen is the target instead of small buttons
-    // (which missed real taps). Tap anywhere toggles play/pause; swipe left/right
-    // skips tracks — sent as BLE HID consumer-control keys (see ble.cpp). Leaving
-    // the media screen is still done by tilting back to portrait / the PWR button.
+    // Dim hints marking the three tap zones (left=prev, center=play/pause,
+    // right=next). Purely visual — the hit area is the full third of the screen,
+    // so an imprecise tap still lands, unlike the old small buttons.
+    lbl_zone_prev = lv_label_create(media_container);
+    lv_label_set_text(lbl_zone_prev, LV_SYMBOL_PREV);
+    lv_obj_set_style_text_font(lbl_zone_prev, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_zone_prev, COL_DIM, 0);
+    lv_obj_align(lbl_zone_prev, LV_ALIGN_TOP_MID, -(L.scr_w / 3), 300);
+    lv_obj_add_flag(lbl_zone_prev, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_zone_play = lv_label_create(media_container);
+    lv_label_set_text(lbl_zone_play, LV_SYMBOL_PLAY);
+    lv_obj_set_style_text_font(lbl_zone_play, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_zone_play, COL_DIM, 0);
+    lv_obj_align(lbl_zone_play, LV_ALIGN_TOP_MID, 0, 300);
+    lv_obj_add_flag(lbl_zone_play, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_zone_next = lv_label_create(media_container);
+    lv_label_set_text(lbl_zone_next, LV_SYMBOL_NEXT);
+    lv_obj_set_style_text_font(lbl_zone_next, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_zone_next, COL_DIM, 0);
+    lv_obj_align(lbl_zone_next, LV_ALIGN_TOP_MID, L.scr_w / 3, 300);
+    lv_obj_add_flag(lbl_zone_next, LV_OBJ_FLAG_HIDDEN);
+
+    // Touch zones: the whole screen is the target (see media_tap_cb). Leaving the
+    // media screen is done by tilting back to portrait / the PWR button.
     lv_obj_add_flag(media_container, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(media_container, media_tap_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(media_container, media_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     // Album cover, streamed by the daemon over BLE (see ble_take_album_art).
     // Takes the top-LEFT slot where the Claude logo normally sits (the logo is
@@ -1013,8 +1036,12 @@ void ui_update(const UsageData* data) {
             lv_obj_clear_flag(lbl_media_title,  LV_OBJ_FLAG_HIDDEN);
             lv_label_set_text(lbl_media_artist, data->media_artist);
             lv_label_set_text(lbl_media_title,  data->media_title);
-            // "Playing/Paused" text intentionally omitted — the moving progress
-            // bar already conveys play state.
+            // Zone hints on: center glyph mirrors play state (▶ when paused).
+            lv_obj_clear_flag(lbl_zone_prev, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_zone_play, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(lbl_zone_next, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(lbl_zone_play,
+                              data->media_playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
             media_base_pos  = data->media_pos;
             media_dur_s     = data->media_dur;
             media_playing_s = data->media_playing;
@@ -1036,6 +1063,9 @@ void ui_update(const UsageData* data) {
             lv_obj_add_flag(bar_media,           LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(lbl_media_time,      LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(img_media_art,       LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_zone_prev,       LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_zone_play,       LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_zone_next,       LV_OBJ_FLAG_HIDDEN);
             media_base_pos = -1;
             media_dur_s    = 0;
         }
@@ -1204,22 +1234,29 @@ static void global_click_cb(lv_event_t* e) {
     else                                  ui_show_screen(SCREEN_SPLASH);
 }
 
-// Whole-screen tap on the media screen: toggle play/pause via HID media key.
-// A short blip confirms the tap registered — the touch used to be missed.
+// Tap zones: play/pause is the big, forgiving center (~56% of the width) so an
+// imprecise tap never skips a track by accident; only a deliberate tap in the
+// outer ~22% edge skips (left=prev, right=next). Uses the release point in LVGL
+// space (touch is already unrotated in my_touch_cb, so X maps to what the user
+// sees as left/right). The whole zone is the target — glyphs are only hints.
 static void media_tap_cb(lv_event_t* e) {
     (void)e;
-    sound_hal_play_click();
-    ble_media_play_pause();
-}
-
-// Swipe left/right on the media screen: skip to the next/previous track.
-static void media_gesture_cb(lv_event_t* e) {
-    (void)e;
     lv_indev_t* indev = lv_indev_active();
-    if (!indev) return;
-    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
-    if (dir == LV_DIR_LEFT)       ble_media_next_track();
-    else if (dir == LV_DIR_RIGHT) ble_media_prev_track();
+    lv_point_t p = { L.scr_w / 2, 0 };   // default to center if no indev
+    if (indev) lv_indev_get_point(indev, &p);
+    uint8_t cmd;
+    if      (p.x < L.scr_w * 22 / 100)   cmd = MEDIA_CMD_PREV;
+    else if (p.x > L.scr_w * 78 / 100)   cmd = MEDIA_CMD_NEXT;
+    else                                 cmd = MEDIA_CMD_PLAYPAUSE;
+    sound_hal_play_click();
+    ble_send_media_cmd(cmd);
+    // Optimistic feedback: flip the center glyph on this frame so play/pause
+    // feels instant even though the daemon round-trip confirms a beat later.
+    if (cmd == MEDIA_CMD_PLAYPAUSE && lbl_zone_play) {
+        media_playing_s = !media_playing_s;
+        lv_label_set_text(lbl_zone_play,
+                          media_playing_s ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    }
 }
 
 void ui_show_screen(screen_t screen) {

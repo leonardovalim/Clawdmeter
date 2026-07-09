@@ -59,8 +59,17 @@ void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
         uint8_t n = touch.getPoint(tx, ty, touch.getSupportTouchPoint());
         if (n > 0) {
             touch_pressed = true;
-            touch_x = (uint16_t)tx[0];
-            touch_y = (uint16_t)ty[0];
+            // The CST9220's reported frame (even after setSwapXY/setMirrorXY) is
+            // rotated 90° from the panel. This never mattered while every screen
+            // only did whole-screen taps, but position-based touch (media tap
+            // zones) needs the true panel frame. Correction verified by a 4-corner
+            // tap calibration: panel TL/TR/BR/BL came back as controller
+            // (452,28)/(444,465)/(50,462)/(30,45) → x=ry, y=S-1-rx. unrotate_touch
+            // then applies the IMU quadrant on top of this corrected base.
+            uint16_t rx = (uint16_t)tx[0];
+            uint16_t ry = (uint16_t)ty[0];
+            touch_x = ry;
+            touch_y = (uint16_t)(LCD_WIDTH - 1 - rx);
         } else {
             touch_pressed = false;
         }

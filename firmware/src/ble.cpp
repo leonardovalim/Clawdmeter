@@ -3,6 +3,8 @@
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
 #include <Preferences.h>
+#include <ArduinoJson.h>
+#include "sprint_net.h"
 
 #define DEVICE_NAME "Clawdmeter"
 
@@ -11,6 +13,7 @@
 #define RX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000002"  // host writes here
 #define TX_CHAR_UUID        "4c41555a-4465-7669-6365-000000000003"  // device ack/nack notifies
 #define REQ_CHAR_UUID       "4c41555a-4465-7669-6365-000000000004"  // device-initiated refresh request
+#define PROV_CHAR_UUID       "4c41555a-4465-7669-6365-000000000005"  // WiFi Sprint provisioning blob
 
 #define BLE_BUF_SIZE 512
 
@@ -89,6 +92,7 @@ static NimBLECharacteristic* input_media = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
+static NimBLECharacteristic* prov_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
@@ -318,6 +322,27 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+// WiFi Sprint provisioning: the daemon writes a {"ssid","pw","tok"} JSON blob
+// once per BLE connection. Same encrypted-link gate as RxCallbacks — no
+// owner check needed since sprint_net_provision only persists to this
+// device's own NVS, it doesn't affect who owns the data channel.
+class ProvCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        if (!info.isEncrypted()) return;                 // same gate as RxCallbacks
+        std::string v = chr->getValue();
+        JsonDocument doc;
+        if (deserializeJson(doc, v)) return;
+        const char* ssid = doc["ssid"] | "";
+        const char* pw   = doc["pw"]   | "";
+        const char* tok  = doc["tok"]  | "";
+        if (ssid[0] && tok[0]) {
+            sprint_net_provision(ssid, pw, tok);
+            Serial.println("BLE: WiFi provisioning received");
+        }
+    }
+};
+static ProvCallbacks provCb;
+
 // When the daemon enables notifications on the refresh char, ask for data
 // if we have none yet. Firing on subscribe (not on connect) ensures the
 // notification isn't dropped before the daemon's CCCD write completes.
@@ -391,6 +416,10 @@ void ble_init(void) {
     );
     static ReqCallbacks reqCb;
     req_char->setCallbacks(&reqCb);
+
+    prov_char = svc->createCharacteristic(
+        PROV_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    prov_char->setCallbacks(&provCb);
 
     svc->start();
     server->start();

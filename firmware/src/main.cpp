@@ -12,6 +12,7 @@
 #include "idle.h"
 #include "idle_cfg.h"
 #include "brightness.h"
+#include "sprint_net.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -187,6 +188,18 @@ static bool parse_json(const char* json, UsageData* out) {
     return true;
 }
 
+// Compare only the bd_* (burndown) fields of two UsageData snapshots. Used to
+// decide whether a freshly-fetched WiFi Sprint actually changed anything
+// worth a redraw (see the WiFi/BLE arbitration in loop()).
+static bool bd_snapshot_equal(const UsageData& a, const UsageData& b) {
+    return a.bd_todo == b.bd_todo && a.bd_doing == b.bd_doing &&
+           a.bd_done == b.bd_done && a.bd_total == b.bd_total &&
+           a.bd_days == b.bd_days && a.bd_max == b.bd_max &&
+           strncmp(a.bd_name, b.bd_name, sizeof(a.bd_name)) == 0 &&
+           memcmp(a.bd_ideal,  b.bd_ideal,  sizeof(a.bd_ideal))  == 0 &&
+           memcmp(a.bd_actual, b.bd_actual, sizeof(a.bd_actual)) == 0;
+}
+
 // ---- Serial command buffer ----
 #define CMD_BUF_SIZE 64
 static char cmd_buf[CMD_BUF_SIZE];
@@ -289,6 +302,7 @@ void setup() {
     lv_indev_set_read_cb(indev, my_touch_cb);
 
     ble_init();
+    sprint_net_init();
     input_hal_init();
 
     ui_init();
@@ -369,6 +383,7 @@ void loop() {
     lv_timer_handler();
     ui_tick_anim();
     ble_tick();
+    sprint_net_tick();
     power_hal_tick();
     imu_hal_tick();
     imu_screen_tick();
@@ -472,10 +487,24 @@ void loop() {
                     g_before, g_after, usage.session_pct);
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
+            // WiFi Sprint wins when fresh; otherwise the BLE bd already in
+            // `usage` stays (fallback). No-op stub on non-WiFi boards.
+            sprint_net_get(&usage);
             ui_update(&usage);
             ble_send_ack();
         } else {
             ble_send_nack();
+        }
+    } else {
+        // No new BLE payload this tick — a WiFi Sprint fetch (every 5 min,
+        // sprint_net_tick above) can still land between BLE polls (~60s
+        // cadence from the daemon). Re-render only if the WiFi bd actually
+        // differs from what's already on screen, so this stays a no-op on
+        // non-WiFi boards and on every loop iteration where nothing changed.
+        UsageData wifi_probe = usage;
+        if (sprint_net_get(&wifi_probe) && !bd_snapshot_equal(wifi_probe, usage)) {
+            usage = wifi_probe;
+            ui_update(&usage);
         }
     }
 

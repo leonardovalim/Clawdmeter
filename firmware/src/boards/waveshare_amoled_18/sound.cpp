@@ -31,6 +31,8 @@ void sound_hal_init(void) {
 }
 
 void sound_hal_play_reset(void) { chime_play_repeated(CHIME_RESET_COUNT, CHIME_RESET_INTERVAL_MS); }
+void sound_hal_play_celebrate(void) { chime_play_fanfare(); }
+void sound_hal_play_click(void)     { chime_play_click(); }
 void sound_hal_tick(void)       { chime_tick(); }
 
 #endif  // BOARD_HAS_SOUND

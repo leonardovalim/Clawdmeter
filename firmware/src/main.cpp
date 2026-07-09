@@ -137,11 +137,15 @@ static bool parse_json(const char* json, UsageData* out) {
         strlcpy(out->media_title,  mi["t"] | "", sizeof(out->media_title));
         strlcpy(out->media_artist, mi["a"] | "", sizeof(out->media_artist));
         out->media_playing = (mi["p"] | 0) == 1;
+        out->media_pos = mi["ps"] | -1;
+        out->media_dur = mi["d"]  | 0;
     } else {
         out->has_media = false;
         out->media_title[0]  = '\0';
         out->media_artist[0] = '\0';
         out->media_playing   = false;
+        out->media_pos       = -1;
+        out->media_dur       = 0;
     }
 
     // Burndown screen
@@ -152,9 +156,31 @@ static bool parse_json(const char* json, UsageData* out) {
         out->bd_doing = bd["dg"] | 0;
         out->bd_done  = bd["dn"] | 0;
         out->bd_total = bd["tt"] | 0;
+        strlcpy(out->bd_name, bd["sn"] | "", sizeof(out->bd_name));
+
+        JsonArray bi = bd["bi"];   // ideal remaining per day
+        JsonArray ba = bd["ba"];   // actual remaining per day (-1 = future)
+        uint8_t n = 0;
+        uint8_t mx = 0;
+        for (JsonVariant v : bi) {
+            if (n >= BD_MAX_DAYS) break;
+            int iv = v | 0;
+            if (iv < 0) iv = 0;
+            out->bd_ideal[n] = (uint8_t)iv;
+            if (iv > mx) mx = (uint8_t)iv;
+            int av = n < ba.size() ? (ba[n] | -1) : -1;
+            out->bd_actual[n] = (int16_t)av;
+            if (av > mx) mx = (uint8_t)av;
+            n++;
+        }
+        out->bd_days = n;
+        out->bd_max  = mx;
     } else {
         out->has_burndown = false;
         out->bd_todo = out->bd_doing = out->bd_done = out->bd_total = 0;
+        out->bd_name[0] = '\0';
+        out->bd_days = 0;
+        out->bd_max  = 0;
     }
 
     out->valid = true;
@@ -422,6 +448,12 @@ void loop() {
     }
 
     check_serial_cmd();
+
+    {
+        const uint8_t* art;
+        int aw, ah;
+        if (ble_take_album_art(&art, &aw, &ah)) ui_set_album_art(art, aw, ah);
+    }
 
     if (ble_has_data()) {
         if (parse_json(ble_get_data(), &usage)) {

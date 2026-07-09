@@ -19,12 +19,37 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 import httpx
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
+
+def _to_display_ascii(s: str) -> str:
+    """Flatten accented/Unicode text to the plain ASCII the on-device bitmap
+    fonts actually ship. Those fonts were generated ASCII-only, so 'ã', 'ç',
+    'é'… render as missing-glyph boxes. NFKD splits each letter from its
+    combining accent; we drop the accents (and any other non-ASCII leftover)
+    so "Paixão" -> "Paixao" instead of "Paix[]o"."""
+    if not s:
+        return s
+    s = s.replace("–", "-").replace("—", "-")  # en/em dash -> hyphen
+    s = unicodedata.normalize("NFKD", s)
+    return s.encode("ascii", "ignore").decode("ascii")
+
+
+def _sanitize_display_strings(obj):
+    """Recursively apply _to_display_ascii to every string in a payload."""
+    if isinstance(obj, str):
+        return _to_display_ascii(obj)
+    if isinstance(obj, dict):
+        return {k: _sanitize_display_strings(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_display_strings(v) for v in obj]
+    return obj
+
 
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
@@ -262,33 +287,202 @@ def _update_heatmap(session_pct: int) -> list[int]:
     return hourly
 
 
-async def _get_media_info() -> dict | None:
-    """Return {t, a, p} from Windows GlobalSystemMediaTransportControls, or None."""
+# Some players (notably web players) report Paused to GSMTC while the track is
+# audibly advancing. Remember the last observed (track, position, wall-clock) so
+# _get_media_info can override "paused" when the position is moving.
+_media_probe: dict | None = None
+
+# Media properties of the session _get_media_info most recently chose — kept so
+# the album-art fetch reads the thumbnail of the same track it reported.
+_media_props = None
+
+
+async def _current_media_session():
+    """Pick the GSMTC session the user actually means.
+
+    get_current_session() is Windows' idea of "current", which is often a paused
+    browser tab while the real player is elsewhere — scan all sessions and
+    prefer the one actually playing.
+    MediaPlaybackStatus: Closed=0, Changing=1, Stopped=2, Playing=3, Paused=4
+    """
     if sys.platform != "win32":
         return None
+    # winsdk is deprecated and has no wheels for Python >= 3.14; its
+    # successor is the per-namespace winrt-* packages (same API surface).
     try:
         from winsdk.windows.media.control import (  # type: ignore[import]
             GlobalSystemMediaTransportControlsSessionManager as GSM,
         )
-        mgr     = await GSM.request_async()
-        session = mgr.get_current_session()
+    except ImportError:
+        from winrt.windows.media.control import (  # type: ignore[import]
+            GlobalSystemMediaTransportControlsSessionManager as GSM,
+        )
+    mgr = await GSM.request_async()
+    try:
+        for s in mgr.get_sessions():
+            pb = s.get_playback_info()
+            if pb is not None and int(getattr(pb, "playback_status", 0) or 0) == 3:
+                return s
+    except Exception:
+        pass
+    return mgr.get_current_session()
+
+
+# Device -> host media commands, notified on REQ_CHAR (see ble_send_media_cmd).
+MEDIA_CMD_PLAYPAUSE = 0x10
+MEDIA_CMD_NEXT      = 0x11
+MEDIA_CMD_PREV      = 0x12
+
+
+async def _media_control(code: int) -> bool:
+    """Apply a transport command from the device to the active media session."""
+    try:
+        session = await _current_media_session()
+        if not session:
+            log("Media command ignored: no active session")
+            return False
+        if code == MEDIA_CMD_PLAYPAUSE:
+            await session.try_toggle_play_pause_async()
+        elif code == MEDIA_CMD_NEXT:
+            await session.try_skip_next_async()
+        elif code == MEDIA_CMD_PREV:
+            await session.try_skip_previous_async()
+        else:
+            return False
+        return True
+    except Exception as e:
+        log(f"Media command 0x{code:02x} failed: {e}")
+        return False
+
+
+async def _get_media_info() -> dict | None:
+    """Return {t, a, p[, ps, d]} from Windows GlobalSystemMediaTransportControls, or None."""
+    global _media_probe, _media_props
+    if sys.platform != "win32":
+        return None
+    _media_props = None
+    try:
+        session = await _current_media_session()
         if not session:
             return None
         props = await session.try_get_media_properties_async()
         if not props:
             return None
+        _media_props = props
         pb = session.get_playback_info()
-        # MediaPlaybackStatus: Closed=0, Changing=1, Stopped=2, Playing=3, Paused=4
-        playing = pb is not None and getattr(pb, "playback_status", None) == 3
-        return {
+        playing = pb is not None and int(getattr(pb, "playback_status", 0) or 0) == 3
+        info = {
             "t": (props.title  or "")[:47],
             "a": (props.artist or "")[:31],
             "p": 1 if playing else 0,
         }
+        # Track position/duration, when the player reports a timeline. Sent as
+        # whole seconds; the firmware interpolates between updates.
+        try:
+            tl = session.get_timeline_properties()
+            dur = int(tl.end_time.total_seconds()) if tl and tl.end_time else 0
+            pos = int(tl.position.total_seconds()) if tl and tl.position else 0
+            if dur > 0:
+                info["ps"] = max(0, min(pos, dur))
+                info["d"] = dur
+        except Exception:
+            pass
+
+        # Paused-but-advancing override: if the same track's position moved
+        # forward roughly in step with wall-clock time, it is playing no matter
+        # what playback_status claims (some players never leave "Paused").
+        now = time.time()
+        if info["p"] == 0 and "ps" in info and _media_probe is not None:
+            same_track = (_media_probe["t"], _media_probe["a"]) == (info["t"], info["a"])
+            elapsed = now - _media_probe["ts"]
+            advanced = info["ps"] - _media_probe["ps"]
+            if same_track and 0 < elapsed <= 90 and 0 < advanced <= elapsed + 3:
+                info["p"] = 1
+        if "ps" in info:
+            _media_probe = {"t": info["t"], "a": info["a"], "ps": info["ps"], "ts": now}
+        else:
+            _media_probe = None
+        return info
     except ImportError:
         return None
     except Exception:
         return None
+
+
+# --- Album art --------------------------------------------------------------
+# The firmware shows a 96x96 cover on the media screen (PSRAM boards only; the
+# others ignore the frames). We read the GSMTC thumbnail, center-crop + resize
+# with Pillow, convert to RGB565 little-endian, and stream it over the RX
+# characteristic in binary frames: b"CA" + chunk_idx + flags(bit0=last) + data.
+# idx 0xFF is "no art for this track" (clears the cover on-device).
+ART_W = ART_H = 96
+
+
+async def _fetch_album_art_rgb565() -> bytes | None:
+    props = _media_props
+    if props is None or getattr(props, "thumbnail", None) is None:
+        return None
+    try:
+        from winrt.windows.storage.streams import Buffer, DataReader, InputStreamOptions
+
+        stream = await props.thumbnail.open_read_async()
+        size = int(stream.size)
+        if size <= 0 or size > 4 * 1024 * 1024:
+            return None
+        buf = Buffer(size)
+        await stream.read_async(buf, size, InputStreamOptions.READ_AHEAD)
+        try:
+            data = bytes(buf)  # pywinrt IBuffer supports the buffer protocol...
+        except TypeError:      # ...but fall back to DataReader if this build doesn't
+            reader = DataReader.from_buffer(buf)
+            data = bytes(reader.read_bytes(buf.length))
+
+        import io
+
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        w, h = img.size
+        side = min(w, h)
+        img = img.crop((
+            (w - side) // 2, (h - side) // 2,
+            (w + side) // 2, (h + side) // 2,
+        )).resize((ART_W, ART_H), Image.LANCZOS)
+        px = img.tobytes()
+        out = bytearray(ART_W * ART_H * 2)
+        j = 0
+        for i in range(0, len(px), 3):
+            v = ((px[i] >> 3) << 11) | ((px[i + 1] >> 2) << 5) | (px[i + 2] >> 3)
+            out[j] = v & 0xFF
+            out[j + 1] = (v >> 8) & 0xFF
+            j += 2
+        return bytes(out)
+    except Exception as e:
+        log(f"Album art fetch failed: {e}")
+        return None
+
+
+async def _send_album_art(client, art: bytes | None) -> bool:
+    """Stream a cover (or a clear frame for None) to the device. True on success."""
+    try:
+        if art is None:
+            await client.write_gatt_char(RX_CHAR_UUID, b"CA\xff\x00", response=True)
+            return True
+        # Chunk to the negotiated MTU (ATT header 3 + our frame header 4). The
+        # floor of 96 keeps chunk_idx comfortably inside one byte.
+        mtu = int(getattr(client, "mtu_size", 0) or 0) or 185
+        chunk = max(96, min(mtu - 7, 480))
+        total = (len(art) + chunk - 1) // chunk
+        for idx in range(total):
+            part = art[idx * chunk:(idx + 1) * chunk]
+            flags = 1 if idx == total - 1 else 0
+            await client.write_gatt_char(
+                RX_CHAR_UUID, bytes((0x43, 0x41, idx, flags)) + part, response=True
+            )
+        return True
+    except (BleakError, OSError, AssertionError) as e:
+        log(f"Album art send failed: {e}")
+        return False
 
 
 def _read_asana_token() -> str | None:
@@ -310,32 +504,47 @@ def _read_asana_token() -> str | None:
     return None
 
 
+def _clamp_series(vals, cap: int) -> list[int]:
+    """Turn a burndown array into small non-negative ints; None/negatives -> -1."""
+    out = []
+    for v in (vals or [])[:cap]:
+        if v is None:
+            out.append(-1)
+        else:
+            try:
+                out.append(max(-1, min(255, int(round(float(v))))))
+            except (TypeError, ValueError):
+                out.append(-1)
+    return out
+
+
 async def _fetch_sprint(asana_token: str) -> dict | None:
-    """Call the Asana MCP get_sprint tool and return {td, dg, dn, tt}, or None."""
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": "get_sprint", "arguments": {"offset": 0}},
-    }
-    headers = {
-        "Authorization": f"Bearer {asana_token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    }
+    """Call the Asana dashboard get_sprint REST tool and return the burndown, or None.
+
+    Returns {sn, td, dg, dn, tt, bi, ba}: sprint name, todo/doing/done counts, and
+    the ideal (bi) + actual (ba) burndown series. Future actual days come back as
+    -1 so the firmware can draw them as gaps.
+    """
+    headers = {"Authorization": f"Bearer {asana_token}"}
+    params = {"tool": "get_sprint", "escopo": "Time"}
     try:
         async with httpx.AsyncClient(timeout=20.0) as http:
-            resp = await http.post(ASANA_MCP_URL, headers=headers, json=payload)
+            resp = await http.get(ASANA_MCP_URL, headers=headers, params=params)
         if resp.status_code != 200:
-            log(f"Asana MCP HTTP {resp.status_code}")
+            log(f"Asana HTTP {resp.status_code}: {resp.text[:120]}")
             return None
-        for line in resp.text.splitlines():
-            if not line.startswith("data: "):
-                continue
-            sc = json.loads(line[6:]).get("result", {}).get("structuredContent", {})
-            if sc:
-                td, dg, dn = sc.get("todo", 0), sc.get("doing", 0), sc.get("done", 0)
-                return {"td": td, "dg": dg, "dn": dn, "tt": td + dg + dn}
+        sc = resp.json()
+        td = int(sc.get("todo", 0) or 0)
+        dg = int(sc.get("doing", 0) or 0)
+        dn = int(sc.get("done", 0) or 0)
+        bi = _clamp_series(sc.get("burndown_ideal"), 14)
+        ba = _clamp_series(sc.get("burndown_actual"), 14)
+        out = {"sn": str(sc.get("sprint", ""))[:15], "td": td, "dg": dg,
+               "dn": dn, "tt": td + dg + dn}
+        if bi:
+            out["bi"] = bi
+            out["ba"] = ba
+        return out
     except Exception as e:
         log(f"Asana poll error: {e}")
     return None
@@ -546,10 +755,35 @@ class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
         self.refresh_requested = asyncio.Event()
+        # Set after a transport command lands, so the poll loop wakes at once
+        # and pushes the new track/state instead of waiting out the 5s TICK.
+        self.media_dirty = asyncio.Event()
+        self._loop = asyncio.get_running_loop()
 
-    def _on_refresh(self, _char, _data: bytearray) -> None:
-        log("Refresh requested by device")
-        self.refresh_requested.set()
+    def _on_refresh(self, _char, data: bytearray) -> None:
+        # REQ_CHAR carries a one-byte opcode: 0x01 = refresh, 0x1x = transport.
+        code = data[0] if data else 0x01
+        if code == 0x01:
+            log("Refresh requested by device")
+            self.refresh_requested.set()
+            return
+        if code not in (MEDIA_CMD_PLAYPAUSE, MEDIA_CMD_NEXT, MEDIA_CMD_PREV):
+            log(f"Unknown device opcode 0x{code:02x}")
+            return
+        name = {MEDIA_CMD_PLAYPAUSE: "play/pause",
+                MEDIA_CMD_NEXT: "next",
+                MEDIA_CMD_PREV: "prev"}[code]
+        log(f"Media command from device: {name}")
+        # Bleak may invoke this off the loop thread; hop back on before spawning.
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(self._run_media(code))
+        )
+
+    async def _run_media(self, code: int) -> None:
+        if await _media_control(code):
+            # Give the player a beat to apply it, then let the loop re-read.
+            await asyncio.sleep(0.35)
+            self.media_dirty.set()
 
     async def setup_refresh_subscription(self) -> None:
         # The refresh subscription is optional — the 60s poll loop works without it.
@@ -564,10 +798,11 @@ class Session:
             log(f"Refresh subscription unavailable: {e}")
 
     async def write_payload(self, payload: dict) -> bool:
+        payload = _sanitize_display_strings(payload)
         data = json.dumps(payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
         try:
-            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
+            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=True)
             return True
         except (BleakError, OSError) as e:
             # WinRT can raise a raw OSError/WinError (NOT wrapped as BleakError)
@@ -721,7 +956,10 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
         )
         try:
             await client.connect()
-        except (BleakError, asyncio.TimeoutError) as e:
+        # AssertionError: bleak's WinRT backend has an internal race in
+        # get_descriptors_async that surfaces as a bare assert (killed the
+        # daemon on 2026-07-07). OSError: WinRT can also raise raw WinError.
+        except (BleakError, asyncio.TimeoutError, AssertionError, OSError) as e:
             log(f"Connection attempt {attempt + 1}/{CONNECT_RETRIES} failed: {e}")
             try:
                 await client.disconnect()
@@ -754,6 +992,8 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     last_poll = 0.0  # D-03: poll immediately on first connect
     used_successfully = False
     consecutive_failures = 0  # D-03: zombie-link break counter
+    cached_payload: dict | None = None  # last usage payload, for media-only refreshes
+    art_sent_key = ()  # (title, artist) whose art was pushed; () forces a first push
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
@@ -778,6 +1018,7 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                             last_poll = time.time()
                             used_successfully = True
                             consecutive_failures = 0  # D-03: reset on success
+                            cached_payload = payload
                             if tray_state:
                                 tray_state.set_connected(time.time())
                         else:
@@ -794,12 +1035,47 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                     # as an auth problem (SC#5). Leave tray state unchanged; the next
                     # tick retries and set_connected() recovers it.
 
+            # Media moves faster than the 60s usage poll (track changes,
+            # play/pause, position). Between polls, re-read the media info every
+            # TICK and resend the cached payload whenever it changed — the
+            # firmware replaces its whole state per message, so the resend must
+            # carry the full usage payload, not just "mi".
+            elif cached_payload is not None:
+                session.media_dirty.clear()
+                mi = await _get_media_info()
+                if mi != cached_payload.get("mi"):
+                    if mi is None:
+                        cached_payload.pop("mi", None)
+                    else:
+                        cached_payload["mi"] = mi
+                    if not await session.write_payload(cached_payload):
+                        consecutive_failures += 1
+                        if consecutive_failures >= ZOMBIE_BREAK_LIMIT:
+                            log(
+                                f"Zombie link detected ({consecutive_failures} consecutive"
+                                f" write failures); abandoning connection"
+                            )
+                            break
+
+            # Album art follows the track: whenever the (title, artist) pair
+            # changes, push the new cover (or a clear frame). On failure the key
+            # is left unchanged so the next tick retries.
+            if cached_payload is not None:
+                mi_now = cached_payload.get("mi")
+                key = (mi_now.get("t"), mi_now.get("a")) if mi_now else None
+                if key != art_sent_key:
+                    art = await _fetch_album_art_rgb565() if key is not None else None
+                    if await _send_album_art(client, art):
+                        art_sent_key = key
+                        log(f"Album art {'sent' if art else 'cleared'} for {key}")
+
             # Wake on a refresh request OR a stop, whichever comes first. Waking
             # promptly on stop_event is what lets the finally below run
             # client.disconnect() before the process exits, so the peer gets a
             # clean GATT disconnect (returns to its waiting screen) instead of
             # being left frozen on stale data after Quit (SC#3 graceful shutdown).
-            await _wait_first(session.refresh_requested, stop_event, timeout=TICK)
+            await _wait_first(session.refresh_requested, session.media_dirty,
+                              stop_event, timeout=TICK)
     finally:
         # Clean GATT disconnect on the way out — this is what tells the peripheral
         # the link is gone. WinRT can surface a raw OSError (not BleakError) here,
@@ -873,7 +1149,14 @@ async def main(tray_state=None) -> None:
             search_backoff = _next_backoff(search_backoff, 60)
             continue
 
-        ok = await connect_and_run(device, stop_event, tray_state)
+        # Catch-all: a single flaky BLE exception must never kill the daemon —
+        # treat any unexpected error as a failed session and re-enter the
+        # reconnect regime.
+        try:
+            ok = await connect_and_run(device, stop_event, tray_state)
+        except Exception as e:
+            log(f"Unexpected error in session ({type(e).__name__}): {e}")
+            ok = False
         if not ok:
             # Fast-reconnect regime: had/attempted a link that dropped — retry quickly
             if tray_state:

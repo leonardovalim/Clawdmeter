@@ -66,6 +66,23 @@ static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
+
+// --- Album art (media screen) ---------------------------------------------
+// The daemon streams a 96x96 RGB565 (little-endian) cover in binary frames on
+// the RX characteristic: 'C','A', chunk_idx, flags(bit0 = last), payload.
+// Chunks arrive in order (host writes with response); a lost/out-of-order
+// chunk aborts the transfer until the host restarts at idx 0. PSRAM-only —
+// C6 boards silently ignore the frames.
+#ifdef BOARD_HAS_PSRAM
+#define ART_W 96
+#define ART_H 96
+#define ART_BYTES (ART_W * ART_H * 2)
+static uint8_t* art_buf = nullptr;       // PSRAM reassembly buffer
+static size_t   art_off = 0;
+static uint8_t  art_expect_idx = 0;
+static volatile bool art_ready = false;  // complete image waiting for the UI
+static volatile bool art_clear = false;  // daemon says: no art for this track
+#endif
 static volatile bool has_received_data = false;
 static char mac_str[18];
 
@@ -229,6 +246,42 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
             return;
         }
         std::string val = chr->getValue();
+#ifdef BOARD_HAS_PSRAM
+        // Binary album-art frame? JSON payloads always start with '{', so the
+        // "CA" magic cannot collide.
+        if (val.length() >= 4 && val[0] == 'C' && val[1] == 'A') {
+            uint8_t idx   = (uint8_t)val[2];
+            uint8_t flags = (uint8_t)val[3];
+            if (idx == 0xFF) {                       // art-clear frame
+                art_clear = true;
+                return;
+            }
+            if (!art_buf) {
+                art_buf = (uint8_t*)heap_caps_malloc(ART_BYTES, MALLOC_CAP_SPIRAM);
+                if (!art_buf) return;
+            }
+            if (idx == 0) { art_off = 0; art_expect_idx = 0; }
+            if (idx != art_expect_idx) {             // lost a chunk — abort quietly
+                art_expect_idx = 0;
+                art_off = 0;
+                return;
+            }
+            size_t n = val.length() - 4;
+            if (art_off + n > ART_BYTES) {           // oversized — abort
+                art_expect_idx = 0;
+                art_off = 0;
+                return;
+            }
+            memcpy(art_buf + art_off, val.data() + 4, n);
+            art_off += n;
+            art_expect_idx++;
+            if (flags & 0x01) {
+                if (art_off == ART_BYTES) art_ready = true;
+                art_expect_idx = 0;
+            }
+            return;
+        }
+#endif
         size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
         memcpy(rx_buf, val.c_str(), len);
         rx_buf[len] = '\0';
@@ -358,6 +411,27 @@ const char* ble_get_data(void) {
     return rx_buf;
 }
 
+bool ble_take_album_art(const uint8_t** buf, int* w, int* h) {
+#ifdef BOARD_HAS_PSRAM
+    if (art_clear) {
+        art_clear = false;
+        art_ready = false;
+        *buf = nullptr;
+        *w = *h = 0;
+        return true;
+    }
+    if (!art_ready) return false;
+    art_ready = false;
+    *buf = art_buf;
+    *w = ART_W;
+    *h = ART_H;
+    return true;
+#else
+    (void)buf; (void)w; (void)h;
+    return false;
+#endif
+}
+
 void ble_send_ack(void) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
         tx_char->setValue("{\"ack\":true}");
@@ -378,6 +452,14 @@ void ble_request_refresh(void) {
         req_char->setValue(&v, 1);
         req_char->notify();
         Serial.println("BLE: refresh requested");
+    }
+}
+
+void ble_send_media_cmd(uint8_t cmd) {
+    if (state == BLE_STATE_CONNECTED && req_char) {
+        req_char->setValue(&cmd, 1);
+        req_char->notify();
+        Serial.printf("BLE: media cmd 0x%02x\n", cmd);
     }
 }
 

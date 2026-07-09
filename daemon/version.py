@@ -6,4 +6,4 @@ glance. Bump whenever you ship something worth telling apart in the tray
 menu: v1.0, v1.0a, v1.0b, ... v1.1, ...
 """
 
-DAEMON_VERSION = "v1.1"
+DAEMON_VERSION = "v2.0"

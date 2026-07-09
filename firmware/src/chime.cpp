@@ -1,5 +1,6 @@
 #include "chime.h"
 #include <Arduino.h>
+#include <math.h>
 #include "ESP_I2S.h"
 #include "es8311.h"
 #include "bell_pcm.h"   // const uint8_t bell_pcm[] / bell_pcm_len — 44.1 kHz 16-bit stereo
@@ -42,6 +43,83 @@ static bool es8311_setup(void) {
         delay(5);
     }
     return true;
+}
+
+// ---- Fanfare: a synthesized "level up" arpeggio -----------------------------
+// C5-E5-G5-C6 plus a held C6. Each note is a sine blended with a square (the
+// square is what gives it the chiptune bite) under an exponential decay
+// envelope. Rendered one note at a time into a ~20 KB scratch buffer rather
+// than one big clip, so we never need a 100 KB allocation.
+static const uint16_t FANFARE_HZ[]  = {523, 659, 784, 1047, 1047};
+static const uint16_t FANFARE_MS[]  = { 90,  90,  90,   90,  240};
+static const int      FANFARE_NOTES = 5;
+
+// A single short blip acknowledging a button tap.
+static const uint16_t CLICK_HZ[]  = {1568};   // G6
+static const uint16_t CLICK_MS[]  = {35};
+static const int      CLICK_NOTES = 1;
+
+// What the currently-queued task should play. Read by tone_task, written by the
+// chime_play_* entry points under the `playing` latch, so it can't race.
+static const uint16_t* tone_hz    = nullptr;
+static const uint16_t* tone_ms    = nullptr;
+static int             tone_count = 0;
+static float           tone_amp   = 9000.0f;
+
+// Render each note into a scratch buffer and stream it. One note at a time so
+// we never need a ~100 KB allocation for the whole clip.
+static void play_tones_blocking(const uint16_t* hz, const uint16_t* ms, int n, float amp) {
+    for (int k = 0; k < n; k++) {
+        const int frames = (cfg.sample_rate * ms[k]) / 1000;
+        int16_t* buf = (int16_t*)malloc((size_t)frames * 2 * sizeof(int16_t));
+        if (!buf) return;                       // out of heap: stay silent
+        const float step = 2.0f * (float)M_PI * hz[k] / cfg.sample_rate;
+        float phase = 0.0f;
+        for (int i = 0; i < frames; i++) {
+            const float env  = expf(-3.2f * (float)i / (float)frames);
+            const float sine = sinf(phase);
+            const float sq   = sine >= 0.0f ? 1.0f : -1.0f;
+            const int16_t v  = (int16_t)((0.45f * sq + 0.55f * sine) * env * amp);
+            buf[2 * i] = v;
+            buf[2 * i + 1] = v;
+            phase += step;
+        }
+        i2s.write((uint8_t*)buf, (size_t)frames * 4);
+        free(buf);
+    }
+    // i2s.write() returns once the data is queued into DMA, not once it has
+    // been clocked out — hold the amp open for the tail (same trap as the bell).
+    delay(ms[n - 1] + 60);
+}
+
+static void tone_task(void* arg) {
+    if (cfg.amp_enable) cfg.amp_enable(true);
+    delay(8);
+    play_tones_blocking(tone_hz, tone_ms, tone_count, tone_amp);
+    if (cfg.amp_enable) cfg.amp_enable(false);
+    playing = false;
+    vTaskDelete(nullptr);
+}
+
+static void queue_tones(const uint16_t* hz, const uint16_t* ms, int n, float amp,
+                        const char* name) {
+    if (!ready || playing) return;
+    playing = true;
+    tone_hz = hz; tone_ms = ms; tone_count = n; tone_amp = amp;
+    // 4 KB isn't enough once the float math pulls in its stack frames.
+    if (xTaskCreatePinnedToCore(tone_task, name, 6144, nullptr, 1, nullptr, 0) != pdPASS) {
+        Serial.printf("chime: %s task create failed\n", name);
+        playing = false;
+    }
+}
+
+void chime_play_fanfare(void) {
+    queue_tones(FANFARE_HZ, FANFARE_MS, FANFARE_NOTES, 9000.0f, "fanfare");
+}
+
+void chime_play_click(void) {
+    // Quieter than the fanfare — this fires on every tap.
+    queue_tones(CLICK_HZ, CLICK_MS, CLICK_NOTES, 4200.0f, "click");
 }
 
 static void chime_task(void* arg) {

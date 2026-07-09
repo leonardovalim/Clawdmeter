@@ -34,6 +34,15 @@ bool chime_init(const ChimeConfig& cfg);
 // or already playing.
 void chime_play(void);
 
+// Queue a short ascending arpeggio ("level up" jingle), synthesized on the fly
+// instead of embedded as PCM. Celebrates sprint tasks landing in Done. Same
+// non-blocking contract as chime_play().
+void chime_play_fanfare(void);
+
+// Queue a single short blip acknowledging a touch. Same non-blocking contract;
+// skipped if a longer sound is already playing.
+void chime_play_click(void);
+
 // Queue `count` playbacks, `interval_ms` apart, driven non-blocking from
 // chime_tick(). Restarts the schedule if a sequence is already in progress.
 void chime_play_repeated(int count, uint32_t interval_ms);

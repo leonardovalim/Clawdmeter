@@ -12,3 +12,10 @@
 void sound_hal_init(void);
 void sound_hal_tick(void);
 void sound_hal_play_reset(void);
+
+// Short celebratory jingle, fired when sprint tasks land in Done between two
+// refreshes. Same non-blocking, ignore-if-unsupported contract as _play_reset.
+void sound_hal_play_celebrate(void);
+
+// Very short blip acknowledging an on-screen button tap.
+void sound_hal_play_click(void);

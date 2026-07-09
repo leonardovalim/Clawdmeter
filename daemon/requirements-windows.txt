@@ -4,4 +4,10 @@ bleak
 httpx
 pystray
 Pillow
-winsdk
+# Now-playing (GlobalSystemMediaTransportControls). winsdk is deprecated and
+# has no wheels for Python >= 3.14 — these are its per-namespace successors;
+# the daemon tries winsdk first, then falls back to winrt.*.
+winrt-runtime
+winrt-Windows.Media.Control
+winrt-Windows.Foundation
+winrt-Windows.Storage.Streams

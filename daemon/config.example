@@ -36,3 +36,11 @@ clock = off
 # counts. Leave unset to disable the burndown screen (it shows "No sprint data").
 # The ASANA_TOKEN environment variable, if set, takes precedence over this line.
 # asana_token = <your-asana-dash-bearer-token>
+
+# --- WiFi Sprint sync (S3 boards only) ---
+# When all three are set, the daemon pushes them to the device once per BLE
+# connect; the device then fetches Sprint over WiFi (fresh even when this host
+# is off). Leave unset to keep Sprint on BLE only.
+# wifi_ssid = YourNetwork
+# wifi_password = your-wifi-password
+# device_token = <the DEVICE_TOKEN from the DashboardAsana Vercel project>

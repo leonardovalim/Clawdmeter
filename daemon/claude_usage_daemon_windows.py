@@ -1020,6 +1020,15 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     session = Session(client)
     await session.setup_refresh_subscription()
 
+    creds = _read_wifi_creds()
+    if creds is not None:
+        try:
+            blob = json.dumps(creds, separators=(",", ":")).encode()
+            await client.write_gatt_char(PROV_CHAR_UUID, blob, response=True)
+            log(f"WiFi provisioning sent (ssid={creds['ssid']})")
+        except (BleakError, OSError, ValueError) as e:
+            log(f"WiFi provisioning skipped: {e}")
+
     last_poll = 0.0  # D-03: poll immediately on first connect
     used_successfully = False
     consecutive_failures = 0  # D-03: zombie-link break counter

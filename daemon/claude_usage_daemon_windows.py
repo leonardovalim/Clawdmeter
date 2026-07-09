@@ -55,6 +55,7 @@ DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+PROV_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -501,6 +502,33 @@ def _read_asana_token() -> str | None:
                 return v if v else None
     except Exception:
         pass
+    return None
+
+
+def _read_wifi_creds():
+    """Return {"ssid","pw","tok"} for WiFi Sprint provisioning, or None if incomplete.
+
+    Reads wifi_ssid / wifi_password / device_token from the config file. Does NOT
+    split on '#', so passwords may contain '#'. Env vars WIFI_SSID / WIFI_PASSWORD /
+    DEVICE_TOKEN take precedence per-field.
+    """
+    vals = {"ssid": os.environ.get("WIFI_SSID", "").strip(),
+            "pw": os.environ.get("WIFI_PASSWORD", ""),
+            "tok": os.environ.get("DEVICE_TOKEN", "").strip()}
+    keymap = {"wifi_ssid": "ssid", "wifi_password": "pw", "device_token": "tok"}
+    try:
+        for line in CONFIG_FILE.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s.startswith("#") or "=" not in s:
+                continue
+            key, val = s.split("=", 1)
+            slot = keymap.get(key.strip().lower())
+            if slot and not vals[slot]:
+                vals[slot] = val.strip()
+    except Exception:
+        pass
+    if vals["ssid"] and vals["pw"] and vals["tok"]:
+        return {"ssid": vals["ssid"], "pw": vals["pw"], "tok": vals["tok"]}
     return None
 
 

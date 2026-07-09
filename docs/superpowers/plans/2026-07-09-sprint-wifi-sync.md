@@ -8,6 +8,46 @@
 
 **Tech Stack:** ESP32 Arduino (pioarduino platform), NimBLE-Arduino, ArduinoJson 7, WiFiClientSecure/HTTPClient + Preferences (bundled with core, no lib_deps), LVGL 9; Python daemons (bleak); Node ESM serverless on Vercel.
 
+---
+
+## Status (updated 2026-07-09, ~5:30pm)
+
+Resuming? Read this first — the `.superpowers/sdd/progress.md` ledger is git-ignored scratch and does NOT travel across machines; this block is the durable status.
+
+- **Task A (1.1, DashboardAsana endpoint): done, pushed to DashboardAsana `main`.**
+  Commit `12fe16a`, plus a required follow-up fix `1600919` (first prod deploy failed:
+  Vercel Hobby plan caps at 12 Serverless Functions, and the new `api/device/sprint.js`
+  was the 13th — `exceeded_serverless_functions_per_deployment`). Fixed by merging the
+  device route into `api/sprint.js` as a `?device=1` branch (Bearer `DEVICE_TOKEN`-gated,
+  same compact `{sn,td,dg,dn,tt,bi,ba}` shape), reachable at the same public
+  `/api/device/sprint` URL via a `vercel.json` rewrite — Task 3.3's `SPRINT_URL` constant
+  in firmware is unaffected. Verified locally (unauthenticated `/api/sprint` unchanged;
+  `/api/device/sprint` 401s without/with-wrong token, 200s with the right one). Pushed
+  directly to `main` with no PR (user explicitly waived the team's PR requirement for this
+  repo, this session only — do not treat as standing policy for other EqSeed repos).
+  **Outstanding:** `DEVICE_TOKEN` must be set in the Vercel project's prod env vars and a
+  redeploy confirmed to return `200` — needs the user's Vercel access, not done yet.
+- **Task B (2.1, daemon config parser): done**, commit `fc97bb2`, task-reviewed clean.
+- **Task C (2.2, daemon PROV write): done**, commit `372bf3e`, task-reviewed clean (minor:
+  no timeout on the `write_gatt_char` call, matches an existing pattern elsewhere).
+- **Task D (3.1-3.5, firmware WiFi path): done**, commit `1fb7b96` on `sprint-wifi-sync`,
+  implementer reports 4/4 PlatformIO envs build clean. Notable fix along the way: PlatformIO's
+  Library Dependency Finder textually greps `#include` lines regardless of `#ifdef` guards, so
+  both C6 envs needed an explicit `lib_ignore = WiFi / HTTPClient / NetworkClientSecure` in
+  `platformio.ini` to keep WiFi code out of the C6 builds — verified via `nm`/`c++filt` that
+  the C6 ELFs link zero WiFi symbols. **Outstanding: this task has NOT yet been through a
+  fresh-subagent task-reviewer gate** (superpowers:subagent-driven-development's per-task
+  review) — only implementer self-review + a controller spot-check against `data.h` field
+  types. Do that review before the final whole-branch review.
+- **Phase 4 (hardware flash + end-to-end WiFi verification): not started.** Needs the
+  physical device on USB. Per `CLAUDE.md`, the user's physical unit is the ESP32-S3
+  AMOLED-2.16 (`waveshare_amoled_216` env) — **not** any C6 variant.
+- **Next steps in order:** (1) task-review Task D, (2) set `DEVICE_TOKEN` in Vercel + confirm
+  `200`, (3) Phase 4 hardware flash/provisioning/verification, (4) final whole-branch review
+  (superpowers:requesting-code-review), (5) superpowers:finishing-a-development-branch.
+
+---
+
 ## Global Constraints
 
 - **The WiFi endpoint and the BLE `bd` payload MUST share one JSON shape:** `{"sn":str,"td":int,"dg":int,"dn":int,"tt":int,"bi":[int...],"ba":[int...]}` — sprint name, todo, doing, done, total, burndown ideal series, burndown actual series (`-1` = future/no data). This is exactly what `daemon/claude_usage_daemon.py::_fetch_sprint` produces and what firmware `parse_json`'s `doc["bd"]` block reads (`firmware/src/main.cpp:152-184`). Do not invent new keys.

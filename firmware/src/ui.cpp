@@ -2,9 +2,13 @@
 #include "splash.h"
 #include <lvgl.h>
 #include <time.h>
+#include <stdlib.h>
+#include <string.h>
 #include "logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
+#include "hal/sound_hal.h"
+#include "ble.h"
 #include "version.h"
 #include "ble.h"
 
@@ -117,15 +121,33 @@ static lv_obj_t* lbl_media_nothing  = nullptr;
 static lv_obj_t* lbl_media_artist   = nullptr;
 static lv_obj_t* lbl_media_title    = nullptr;
 static lv_obj_t* lbl_media_status   = nullptr;
+static lv_obj_t* bar_media          = nullptr;  // track progress bar
+static lv_obj_t* lbl_media_time     = nullptr;  // "1:23 / 3:16" under the bar
+static lv_obj_t* img_media_art      = nullptr;  // album cover (RGB565 from BLE)
+static lv_obj_t* btn_media_prev     = nullptr;  // transport controls
+static lv_obj_t* btn_media_play     = nullptr;
+static lv_obj_t* btn_media_next     = nullptr;
+static lv_obj_t* lbl_media_play     = nullptr;  // play/pause glyph, toggled locally
+static lv_image_dsc_t media_art_dsc;
+// Track progress interpolation: the daemon refreshes position every ~5s; between
+// updates we advance it locally while playing (same base+tick pattern as the clock).
+static int      media_base_pos  = -1;  // seconds at last payload (-1 = no timeline)
+static int      media_dur_s     = 0;
+static bool     media_playing_s = false;
+static uint32_t media_base_ms   = 0;   // lv_tick when media_base_pos landed
+static int      media_last_shown = -1; // last rendered second; avoids redraw spam
 
 // ---- Burndown screen (SCREEN_BURNDOWN) ----
 static lv_obj_t* burndown_container = nullptr;
 static lv_obj_t* lbl_bd_todo        = nullptr;
 static lv_obj_t* lbl_bd_doing       = nullptr;
 static lv_obj_t* lbl_bd_done        = nullptr;
-static lv_obj_t* bar_bd             = nullptr;  // sprint completion bar
-static lv_obj_t* lbl_bd_pct         = nullptr;
 static lv_obj_t* lbl_bd_nothing     = nullptr;
+static lv_obj_t* lbl_bd_sprint      = nullptr;  // "Sprint 32" subtitle
+static lv_obj_t* chart_bd           = nullptr;  // burndown line chart
+static lv_chart_series_t* ser_bd_ideal  = nullptr;
+static lv_chart_series_t* ser_bd_actual = nullptr;
+static lv_obj_t* lbl_bd_legend      = nullptr;
 
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
@@ -250,8 +272,6 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
-static void media_tap_cb(lv_event_t* e);
-static void media_gesture_cb(lv_event_t* e);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -558,6 +578,71 @@ static void init_stats_screen(lv_obj_t* scr) {
 
 // ======== Media screen ========
 
+// Keeps the play/pause glyph in sync with whatever we believe the player is
+// doing — driven both by incoming payloads and by the optimistic local flip.
+static void render_play_glyph(void) {
+    if (lbl_media_play)
+        lv_label_set_text(lbl_media_play, media_playing_s ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+}
+
+static void media_play_cb(lv_event_t* e) {
+    (void)e;
+    sound_hal_play_click();
+    ble_send_media_cmd(MEDIA_CMD_PLAYPAUSE);
+    // Flip locally so the icon responds on the same frame as the tap; the next
+    // payload (the daemon pushes one ~0.35s after applying the command) wins.
+    media_playing_s = !media_playing_s;
+    media_base_pos  = -1;         // position is stale until the host confirms
+    render_play_glyph();
+}
+
+static void media_prev_cb(lv_event_t* e) {
+    (void)e;
+    sound_hal_play_click();
+    ble_send_media_cmd(MEDIA_CMD_PREV);
+}
+
+static void media_next_cb(lv_event_t* e) {
+    (void)e;
+    sound_hal_play_click();
+    ble_send_media_cmd(MEDIA_CMD_NEXT);
+}
+
+// Animate the press feedback in/out rather than snapping, so a quick tap still
+// reads as a deliberate flash instead of a single-frame flicker.
+static const lv_style_prop_t tr_media_btn_props[] = {
+    LV_STYLE_BG_COLOR, LV_STYLE_TRANSFORM_SCALE_X, LV_STYLE_TRANSFORM_SCALE_Y,
+    LV_STYLE_PROP_INV,
+};
+static lv_style_transition_dsc_t tr_media_btn;
+
+static lv_obj_t* make_media_btn(lv_obj_t* parent, int dx, const char* glyph,
+                                lv_event_cb_t cb) {
+    lv_obj_t* btn = lv_button_create(parent);
+    lv_obj_set_size(btn, 88, 64);
+    lv_obj_align(btn, LV_ALIGN_TOP_MID, dx, 292);
+    lv_obj_set_style_bg_color(btn, COL_BAR_BG, 0);
+    lv_obj_set_style_radius(btn, 14, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    // Held-down feedback: fill with the accent and grow slightly, so a tap is
+    // unmistakable even before the host echoes the new player state back.
+    lv_obj_set_style_bg_color(btn, COL_ACCENT, LV_STATE_PRESSED);
+    lv_obj_set_style_transform_scale(btn, 276, LV_STATE_PRESSED);   // 256 = 1.0x
+    lv_obj_set_style_transform_scale(btn, 256, 0);
+    lv_obj_set_style_transition(btn, &tr_media_btn, 0);
+    lv_obj_set_style_transition(btn, &tr_media_btn, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_ext_click_area(btn, 20);
+
+    lv_obj_t* lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, glyph);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
+    lv_obj_center(lbl);
+    return btn;
+}
+
 static void init_media_screen(lv_obj_t* scr) {
     media_container = lv_obj_create(scr);
     lv_obj_set_size(media_container, L.scr_w, L.scr_h);
@@ -567,12 +652,10 @@ static void init_media_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(media_container, 0, 0);
     lv_obj_set_style_pad_all(media_container, 0, 0);
     lv_obj_clear_flag(media_container, LV_OBJ_FLAG_SCROLLABLE);
-    // Media screen overrides the usual tap-to-splash behavior: tap toggles
-    // play/pause, swipe left/right skips tracks — sent as BLE HID consumer-
-    // control keys (see ble.cpp). Getting to another screen still works via
-    // tilting back to portrait, same as reaching this screen in the first place.
-    lv_obj_add_event_cb(media_container, media_tap_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(media_container, media_gesture_cb, LV_EVENT_GESTURE, NULL);
+    // Deliberately NO global_click_cb here: this screen's taps belong to the
+    // transport buttons. Sending a near-miss to the splash screen would make
+    // play/pause/next unusable. Splash stays reachable from the other screens
+    // and from the PWR button.
     lv_obj_add_flag(media_container, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t* title = lv_label_create(media_container);
@@ -611,6 +694,78 @@ static void init_media_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_media_status, COL_ACCENT, 0);
     lv_obj_align(lbl_media_status, LV_ALIGN_TOP_MID, 0, 305);
     lv_obj_add_flag(lbl_media_status, LV_OBJ_FLAG_HIDDEN);
+
+    bar_media = make_bar(media_container, (L.scr_w - L.content_w) / 2, 370,
+                         L.content_w, 8);
+    lv_bar_set_range(bar_media, 0, 1000);   // per-mille — smooth on long tracks
+    lv_obj_set_style_bg_color(bar_media, COL_ACCENT, LV_PART_INDICATOR);
+    lv_obj_add_flag(bar_media, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_media_time = lv_label_create(media_container);
+    lv_label_set_text(lbl_media_time, "");
+    lv_obj_set_style_text_font(lbl_media_time, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(lbl_media_time, COL_DIM, 0);
+    lv_obj_align(lbl_media_time, LV_ALIGN_TOP_MID, 0, 392);
+    lv_obj_add_flag(lbl_media_time, LV_OBJ_FLAG_HIDDEN);
+
+    // Transport controls, in the band the old "Playing/Paused" label vacated.
+    lv_style_transition_dsc_init(&tr_media_btn, tr_media_btn_props,
+                                 lv_anim_path_ease_out, 90, 0, NULL);
+    btn_media_prev = make_media_btn(media_container, -132, LV_SYMBOL_PREV, media_prev_cb);
+    btn_media_play = make_media_btn(media_container,    0, LV_SYMBOL_PLAY, media_play_cb);
+    btn_media_next = make_media_btn(media_container,  132, LV_SYMBOL_NEXT, media_next_cb);
+    lbl_media_play = lv_obj_get_child(btn_media_play, 0);
+    lv_obj_add_flag(btn_media_prev, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(btn_media_play, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(btn_media_next, LV_OBJ_FLAG_HIDDEN);
+
+    // Album cover, streamed by the daemon over BLE (see ble_take_album_art).
+    // Takes the top-LEFT slot where the Claude logo normally sits (the logo is
+    // hidden on this screen — see ui_show_screen). Source is 96x96, scaled
+    // ~0.7x with the pivot at the top-left corner so the scaled top-left lands
+    // exactly on the alignment position (matching the logo's old spot).
+    img_media_art = lv_image_create(media_container);
+    lv_image_set_pivot(img_media_art, 0, 0);
+    lv_image_set_scale(img_media_art, 180);   // 96 * 180/256 ≈ 67px
+    lv_obj_align(img_media_art, LV_ALIGN_TOP_LEFT, L.margin, L.title_y - 10);
+    lv_obj_set_style_radius(img_media_art, 10, 0);
+    lv_obj_set_style_clip_corner(img_media_art, true, 0);
+    lv_obj_add_flag(img_media_art, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_set_album_art(const uint8_t* rgb565, int w, int h) {
+    if (!img_media_art) return;
+    if (!rgb565 || w <= 0 || h <= 0) {
+        lv_obj_add_flag(img_media_art, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    memset(&media_art_dsc, 0, sizeof(media_art_dsc));
+    media_art_dsc.header.w = w;
+    media_art_dsc.header.h = h;
+    media_art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    media_art_dsc.header.stride = w * 2;
+    media_art_dsc.data = rgb565;
+    media_art_dsc.data_size = (uint32_t)w * h * 2;
+    // The BLE layer reuses one buffer for every cover; image caching is off
+    // (LV_CACHE_DEF_SIZE 0), so re-setting the src + invalidating repaints
+    // straight from the updated pixels.
+    lv_image_set_src(img_media_art, &media_art_dsc);
+    lv_obj_clear_flag(img_media_art, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(img_media_art);
+}
+
+// Render the media progress bar + time label for a given position (seconds).
+static void render_media_progress(int pos) {
+    if (media_dur_s <= 0) return;
+    if (pos < 0) pos = 0;
+    if (pos > media_dur_s) pos = media_dur_s;
+    if (pos == media_last_shown) return;
+    media_last_shown = pos;
+    lv_bar_set_value(bar_media, (int)((int64_t)pos * 1000 / media_dur_s), LV_ANIM_OFF);
+    char tbuf[24];
+    snprintf(tbuf, sizeof(tbuf), "%d:%02d / %d:%02d",
+             pos / 60, pos % 60, media_dur_s / 60, media_dur_s % 60);
+    lv_label_set_text(lbl_media_time, tbuf);
 }
 
 // ======== Burndown screen ========
@@ -629,9 +784,15 @@ static void init_burndown_screen(lv_obj_t* scr) {
 
     lv_obj_t* title = lv_label_create(burndown_container);
     lv_label_set_text(title, "Sprint");
-    lv_obj_set_style_text_font(title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(title, &font_tiempos_34, 0);
     lv_obj_set_style_text_color(title, COL_TEXT, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, L.title_y);
+
+    lbl_bd_sprint = lv_label_create(burndown_container);
+    lv_label_set_text(lbl_bd_sprint, "");
+    lv_obj_set_style_text_font(lbl_bd_sprint, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(lbl_bd_sprint, COL_DIM, 0);
+    lv_obj_align(lbl_bd_sprint, LV_ALIGN_TOP_MID, 0, L.title_y + 42);
 
     lbl_bd_nothing = lv_label_create(burndown_container);
     lv_label_set_text(lbl_bd_nothing, "No sprint data");
@@ -639,10 +800,28 @@ static void init_burndown_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_bd_nothing, COL_DIM, 0);
     lv_obj_align(lbl_bd_nothing, LV_ALIGN_CENTER, 0, 0);
 
-    // Three columns: To Do / Doing / Done
+    // Burndown line chart: ideal (dim) vs actual (accent).
+    chart_bd = lv_chart_create(burndown_container);
+    lv_obj_set_size(chart_bd, L.content_w, 210);
+    lv_obj_align(chart_bd, LV_ALIGN_TOP_MID, 0, 120);
+    lv_chart_set_type(chart_bd, LV_CHART_TYPE_LINE);
+    lv_chart_set_update_mode(chart_bd, LV_CHART_UPDATE_MODE_SHIFT);
+    lv_chart_set_div_line_count(chart_bd, 4, 0);
+    lv_obj_set_style_bg_color(chart_bd, COL_BAR_BG, 0);
+    lv_obj_set_style_bg_opa(chart_bd, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(chart_bd, 0, 0);
+    lv_obj_set_style_radius(chart_bd, 10, 0);
+    lv_obj_set_style_pad_all(chart_bd, 8, 0);
+    lv_obj_set_style_line_color(chart_bd, COL_DIM, LV_PART_MAIN);   // grid lines
+    lv_obj_set_style_line_opa(chart_bd, LV_OPA_20, LV_PART_MAIN);
+    lv_obj_set_style_size(chart_bd, 4, 4, LV_PART_INDICATOR);        // point radius
+    ser_bd_ideal  = lv_chart_add_series(chart_bd, COL_DIM,    LV_CHART_AXIS_PRIMARY_Y);
+    ser_bd_actual = lv_chart_add_series(chart_bd, COL_ACCENT, LV_CHART_AXIS_PRIMARY_Y);
+
+    // Compact To Do / Doing / Done row under the chart.
     const int col_w  = (L.content_w - 8) / 3;
-    const int col_y  = 110;
-    const int col_h  = 180;
+    const int col_y  = 345;
+    const int col_h  = 100;
     const char* labels[3] = {"To Do", "Doing", "Done"};
     lv_color_t  colors[3] = {COL_DIM, COL_AMBER, COL_GREEN};
     lv_obj_t**  ptrs[3]   = {&lbl_bd_todo, &lbl_bd_doing, &lbl_bd_done};
@@ -653,9 +832,9 @@ static void init_burndown_screen(lv_obj_t* scr) {
 
         lv_obj_t* count = lv_label_create(panel);
         lv_label_set_text(count, "--");
-        lv_obj_set_style_text_font(count, &font_tiempos_56, 0);
+        lv_obj_set_style_text_font(count, &font_tiempos_34, 0);
         lv_obj_set_style_text_color(count, colors[i], 0);
-        lv_obj_align(count, LV_ALIGN_TOP_MID, 0, 16);
+        lv_obj_align(count, LV_ALIGN_TOP_MID, 0, 12);
         *ptrs[i] = count;
 
         lv_obj_t* lbl = lv_label_create(panel);
@@ -665,17 +844,85 @@ static void init_burndown_screen(lv_obj_t* scr) {
         lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -8);
     }
 
-    // Sprint completion bar
-    bar_bd = make_bar(burndown_container, L.margin, 315, L.content_w, 24);
+    lv_obj_add_flag(chart_bd,      LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
+}
 
-    lbl_bd_pct = lv_label_create(burndown_container);
-    lv_label_set_text(lbl_bd_pct, "");
-    lv_obj_set_style_text_font(lbl_bd_pct, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(lbl_bd_pct, COL_DIM, 0);
-    lv_obj_align(lbl_bd_pct, LV_ALIGN_TOP_MID, 0, 350);
+// ======== Confetti (sprint celebration) ========
+//
+// A burst of falling rectangles over the burndown screen, fired when tasks land
+// in Done between two refreshes. The particles are allocated once and reused —
+// each burst just re-randomizes and restarts their animations, so a celebration
+// costs no allocation and leaves nothing to free.
 
-    lv_obj_add_flag(bar_bd,     LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(lbl_bd_pct, LV_OBJ_FLAG_HIDDEN);
+#define CONFETTI_N 28
+
+static lv_obj_t* confetti[CONFETTI_N];
+static bool      confetti_built = false;
+
+static void confetti_set_y(void* obj, int32_t v) { lv_obj_set_y((lv_obj_t*)obj, v); }
+static void confetti_set_x(void* obj, int32_t v) { lv_obj_set_x((lv_obj_t*)obj, v); }
+
+static void confetti_hide(lv_anim_t* a) {
+    lv_obj_add_flag((lv_obj_t*)a->var, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void confetti_build(void) {
+    if (confetti_built || !burndown_container) return;
+    for (int i = 0; i < CONFETTI_N; i++) {
+        lv_obj_t* p = lv_obj_create(burndown_container);
+        lv_obj_set_size(p, 8, 14);
+        lv_obj_set_style_radius(p, 2, 0);
+        lv_obj_set_style_border_width(p, 0, 0);
+        lv_obj_set_style_pad_all(p, 0, 0);
+        lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(p, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN);
+        confetti[i] = p;
+    }
+    confetti_built = true;
+}
+
+static void confetti_burst(void) {
+    confetti_build();
+    if (!confetti_built) return;
+
+    static const lv_color_t palette[] = {
+        COL_ACCENT, COL_GREEN, COL_TEXT,
+    };
+    const int npal = sizeof(palette) / sizeof(palette[0]);
+
+    for (int i = 0; i < CONFETTI_N; i++) {
+        lv_obj_t* p = confetti[i];
+        const int x0   = rand() % (L.scr_w - 8);
+        const int drift = (rand() % 81) - 40;      // -40..+40 px sideways
+        const int y0   = -20 - (rand() % 60);
+        const int dur  = 1100 + (rand() % 900);
+        const int wait = rand() % 400;
+
+        lv_obj_set_style_bg_color(p, palette[rand() % npal], 0);
+        lv_obj_set_pos(p, x0, y0);
+        lv_obj_clear_flag(p, LV_OBJ_FLAG_HIDDEN);
+
+        lv_anim_t ay;
+        lv_anim_init(&ay);
+        lv_anim_set_var(&ay, p);
+        lv_anim_set_exec_cb(&ay, confetti_set_y);
+        lv_anim_set_values(&ay, y0, L.scr_h + 30);
+        lv_anim_set_time(&ay, dur);
+        lv_anim_set_delay(&ay, wait);
+        lv_anim_set_ready_cb(&ay, confetti_hide);   // park it once it exits frame
+        lv_anim_start(&ay);
+
+        lv_anim_t ax;
+        lv_anim_init(&ax);
+        lv_anim_set_var(&ax, p);
+        lv_anim_set_exec_cb(&ax, confetti_set_x);
+        lv_anim_set_values(&ax, x0, x0 + drift);
+        lv_anim_set_time(&ax, dur);
+        lv_anim_set_delay(&ax, wait);
+        lv_anim_start(&ax);
+    }
 }
 
 // ======== Public API ========
@@ -835,23 +1082,60 @@ void ui_update(const UsageData* data) {
             lv_obj_add_flag(lbl_media_nothing, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(lbl_media_artist, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(lbl_media_title,  LV_OBJ_FLAG_HIDDEN);
-            lv_obj_clear_flag(lbl_media_status, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(btn_media_prev, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(btn_media_play, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(btn_media_next, LV_OBJ_FLAG_HIDDEN);
             lv_label_set_text(lbl_media_artist, data->media_artist);
             lv_label_set_text(lbl_media_title,  data->media_title);
-            lv_label_set_text(lbl_media_status, data->media_playing ? "Playing" : "Paused");
-            lv_obj_set_style_text_color(lbl_media_status,
-                data->media_playing ? COL_GREEN : COL_DIM, 0);
+            // "Playing/Paused" text intentionally omitted — the moving progress
+            // bar and the play/pause glyph already convey play state.
+            media_base_pos  = data->media_pos;
+            media_dur_s     = data->media_dur;
+            media_playing_s = data->media_playing;
+            render_play_glyph();
+            media_base_ms   = last_data_ms;
+            media_last_shown = -1;   // force a redraw with the fresh position
+            if (media_dur_s > 0 && media_base_pos >= 0) {
+                lv_obj_clear_flag(bar_media,       LV_OBJ_FLAG_HIDDEN);
+                lv_obj_clear_flag(lbl_media_time,  LV_OBJ_FLAG_HIDDEN);
+                render_media_progress(media_base_pos);
+            } else {
+                lv_obj_add_flag(bar_media,       LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(lbl_media_time,  LV_OBJ_FLAG_HIDDEN);
+            }
         } else {
             lv_obj_clear_flag(lbl_media_nothing, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(lbl_media_artist,    LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(lbl_media_title,     LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(lbl_media_status,    LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(bar_media,           LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_media_time,      LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(img_media_art,       LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(btn_media_prev,      LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(btn_media_play,      LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(btn_media_next,      LV_OBJ_FLAG_HIDDEN);
+            media_base_pos = -1;
+            media_dur_s    = 0;
         }
     }
 
     // ---- Burndown screen ----
     if (burndown_container) {
         if (data->has_burndown) {
+            // Celebrate tasks that crossed into Done since the last payload.
+            // -1 means "no baseline yet", so a fresh boot or a reconnect never
+            // fires. A sprint rollover re-baselines instead of celebrating the
+            // new sprint's inherited Done count.
+            static int  last_bd_done = -1;
+            static char last_bd_name[sizeof(data->bd_name)] = {0};
+            const bool same_sprint = strcmp(last_bd_name, data->bd_name) == 0;
+            if (same_sprint && last_bd_done >= 0 && data->bd_done > last_bd_done) {
+                confetti_burst();
+                sound_hal_play_celebrate();
+            }
+            last_bd_done = data->bd_done;
+            snprintf(last_bd_name, sizeof(last_bd_name), "%s", data->bd_name);
+
             lv_obj_add_flag(lbl_bd_nothing, LV_OBJ_FLAG_HIDDEN);
             snprintf(buf, sizeof(buf), "%d", data->bd_todo);
             lv_label_set_text(lbl_bd_todo,  buf);
@@ -859,21 +1143,37 @@ void ui_update(const UsageData* data) {
             lv_label_set_text(lbl_bd_doing, buf);
             snprintf(buf, sizeof(buf), "%d", data->bd_done);
             lv_label_set_text(lbl_bd_done,  buf);
-            int total    = data->bd_total > 0 ? data->bd_total : 1;
-            int done_pct = (data->bd_done * 100) / total;
-            lv_obj_clear_flag(bar_bd,     LV_OBJ_FLAG_HIDDEN);
-            lv_obj_clear_flag(lbl_bd_pct, LV_OBJ_FLAG_HIDDEN);
-            lv_bar_set_value(bar_bd, done_pct, LV_ANIM_ON);
-            lv_obj_set_style_bg_color(bar_bd, pct_color((float)done_pct), LV_PART_INDICATOR);
-            snprintf(buf, sizeof(buf), "%d%% complete", done_pct);
-            lv_label_set_text(lbl_bd_pct, buf);
+
+            if (data->bd_name[0]) {
+                lv_label_set_text(lbl_bd_sprint, data->bd_name);
+                lv_obj_clear_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
+            }
+
+            // Burndown chart: plot ideal + actual; future actual points are gaps.
+            if (data->bd_days > 0 && data->bd_max > 0 && chart_bd) {
+                lv_chart_set_point_count(chart_bd, data->bd_days);
+                lv_chart_set_range(chart_bd, LV_CHART_AXIS_PRIMARY_Y, 0, data->bd_max);
+                for (int i = 0; i < data->bd_days; i++) {
+                    lv_chart_set_value_by_id(chart_bd, ser_bd_ideal, i,
+                                             data->bd_ideal[i]);
+                    lv_chart_set_value_by_id(chart_bd, ser_bd_actual, i,
+                        (data->bd_actual[i] < 0) ? LV_CHART_POINT_NONE
+                                                 : (int32_t)data->bd_actual[i]);
+                }
+                lv_chart_refresh(chart_bd);
+                lv_obj_clear_flag(chart_bd, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(chart_bd, LV_OBJ_FLAG_HIDDEN);
+            }
         } else {
             lv_obj_clear_flag(lbl_bd_nothing, LV_OBJ_FLAG_HIDDEN);
             lv_label_set_text(lbl_bd_todo,  "--");
             lv_label_set_text(lbl_bd_doing, "--");
             lv_label_set_text(lbl_bd_done,  "--");
-            lv_obj_add_flag(bar_bd,     LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(lbl_bd_pct, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(chart_bd,      LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
         }
     }
 }
@@ -932,6 +1232,13 @@ void ui_tick_anim(void) {
         }
     }
 
+    // Track progress on the media screen: advance locally while playing so the
+    // bar moves every second between the daemon's ~5s refreshes.
+    if (current_screen == SCREEN_MEDIA && media_playing_s &&
+        media_dur_s > 0 && media_base_pos >= 0) {
+        render_media_progress(media_base_pos + (int)((now - media_base_ms) / 1000));
+    }
+
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
         anim_msg_start = now;
@@ -975,20 +1282,6 @@ static void global_click_cb(lv_event_t* e) {
     else                                  ui_show_screen(SCREEN_SPLASH);
 }
 
-static void media_tap_cb(lv_event_t* e) {
-    (void)e;
-    ble_media_play_pause();
-}
-
-static void media_gesture_cb(lv_event_t* e) {
-    (void)e;
-    lv_indev_t* indev = lv_indev_active();
-    if (!indev) return;
-    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
-    if (dir == LV_DIR_LEFT)       ble_media_next_track();
-    else if (dir == LV_DIR_RIGHT) ble_media_prev_track();
-}
-
 void ui_show_screen(screen_t screen) {
     // Hide all content containers
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
@@ -1017,12 +1310,19 @@ void ui_show_screen(screen_t screen) {
     default: break;
     }
 
-    if (screen != SCREEN_SPLASH && lbl_anim)
+    // Whimsical status line lives on the usage screen only — the other screens
+    // (media, stats, sprint) have their own content and shouldn't waste the
+    // bottom band on it.
+    if (screen == SCREEN_USAGE && lbl_anim)
         lv_obj_clear_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
 
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        // Media screen reuses the top-left slot for the album cover, so the
+        // logo steps aside there.
+        if (screen == SCREEN_SPLASH || screen == SCREEN_MEDIA)
+            lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (lbl_version) {

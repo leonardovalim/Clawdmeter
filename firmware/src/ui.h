@@ -13,6 +13,9 @@ enum screen_t {
 
 void ui_init(void);
 void ui_update(const UsageData* data);
+// Album cover for the media screen: w*h RGB565 (little-endian) pixels.
+// nullptr clears/hides the cover. The buffer must stay valid until replaced.
+void ui_set_album_art(const uint8_t* rgb565, int w, int h);
 void ui_tick_anim(void);
 void ui_show_screen(screen_t screen);
 void ui_toggle_splash(void);

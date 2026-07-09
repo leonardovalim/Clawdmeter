@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 
+#define BD_MAX_DAYS 14   // burndown series cap (sprints are ~10 working days)
+
 struct UsageData {
     float session_pct;       // utilization 0-100 (5h window Pro/Max; spending % Enterprise)
     int session_reset_mins;  // minutes until reset
@@ -26,6 +28,8 @@ struct UsageData {
     char media_artist[32];
     bool media_playing;
     bool has_media;
+    int  media_pos;          // seconds into the track (-1 = player has no timeline)
+    int  media_dur;          // track length in seconds (0 = player has no timeline)
 
     // Burndown screen (SCREEN_BURNDOWN)
     uint8_t bd_todo;         // open tasks
@@ -33,4 +37,9 @@ struct UsageData {
     uint8_t bd_done;         // completed this sprint
     uint8_t bd_total;        // total sprint tasks
     bool    has_burndown;
+    char    bd_name[16];     // sprint label e.g. "Sprint 32"
+    uint8_t bd_days;         // number of points in the burndown series (<= BD_MAX_DAYS)
+    uint8_t bd_ideal[BD_MAX_DAYS];   // ideal remaining per day
+    int16_t bd_actual[BD_MAX_DAYS];  // actual remaining per day; -1 = future/no data
+    uint8_t bd_max;          // Y-axis top (usually bd_ideal[0]); 0 = no series
 };

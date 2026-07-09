@@ -17,12 +17,39 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 import httpx
 from bleak import BleakClient
 from bleak.exc import BleakError
+
+
+def _to_display_ascii(s: str) -> str:
+    """Flatten accented/Unicode text to the plain ASCII the on-device bitmap
+    fonts actually ship. Those fonts were generated ASCII-only, so 'ã', 'ç',
+    'é'… render as missing-glyph boxes. NFKD splits each letter from its
+    combining accent; we drop the accents (and any other non-ASCII leftover)
+    so "Paixão" -> "Paixao" instead of "Paix[]o"."""
+    if not s:
+        return s
+    s = s.replace("–", "-").replace("—", "-")  # en/em dash -> hyphen
+    s = unicodedata.normalize("NFKD", s)
+    return s.encode("ascii", "ignore").decode("ascii")
+
+
+def _sanitize_display_strings(obj):
+    """Recursively apply _to_display_ascii to every string in a payload."""
+    if isinstance(obj, str):
+        return _to_display_ascii(obj)
+    if isinstance(obj, dict):
+        return {k: _sanitize_display_strings(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_display_strings(v) for v in obj]
+    return obj
+
 
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
@@ -457,18 +484,53 @@ def _update_heatmap(session_pct: int) -> list[int]:
 # AppleScript that returns "title\nartist\nstate" for Spotify (preferred) or
 # Music, or "" when nothing is playing. Avoids the private MediaRemote framework
 # (locked down in macOS 15.4) — the two scriptable players cover the ask.
+# Emits 6 lines: app, title, artist, state, position(s), duration(s).
+# A playing app wins over a merely-loaded one, mirroring the Windows daemon's
+# "prefer the session that is actually playing" rule. Spotify reports the track
+# duration in milliseconds, Music in seconds — normalized to seconds here.
 _MEDIA_APPLESCRIPT = r'''
 set out to ""
+set lf to linefeed
 tell application "System Events"
     set spotOn to (exists (processes where name is "Spotify"))
     set musicOn to (exists (processes where name is "Music"))
 end tell
+
+-- Pass 1: whichever app is actually playing wins.
 if spotOn then
     try
         tell application "Spotify"
+            if player state is playing then
+                set out to "Spotify" & lf & (name of current track) & lf & ¬
+                    (artist of current track) & lf & "playing" & lf & ¬
+                    ((player position) as text) & lf & ¬
+                    (((duration of current track) / 1000) as text)
+            end if
+        end tell
+    end try
+end if
+if out is "" and musicOn then
+    try
+        tell application "Music"
+            if player state is playing then
+                set out to "Music" & lf & (name of current track) & lf & ¬
+                    (artist of current track) & lf & "playing" & lf & ¬
+                    ((player position) as text) & lf & ¬
+                    ((duration of current track) as text)
+            end if
+        end tell
+    end try
+end if
+
+-- Pass 2: nothing playing — fall back to a loaded-but-paused track.
+if out is "" and spotOn then
+    try
+        tell application "Spotify"
             if player state is not stopped then
-                set out to (name of current track) & linefeed & ¬
-                    (artist of current track) & linefeed & (player state as text)
+                set out to "Spotify" & lf & (name of current track) & lf & ¬
+                    (artist of current track) & lf & (player state as text) & lf & ¬
+                    ((player position) as text) & lf & ¬
+                    (((duration of current track) / 1000) as text)
             end if
         end tell
     end try
@@ -477,8 +539,10 @@ if out is "" and musicOn then
     try
         tell application "Music"
             if player state is not stopped then
-                set out to (name of current track) & linefeed & ¬
-                    (artist of current track) & linefeed & (player state as text)
+                set out to "Music" & lf & (name of current track) & lf & ¬
+                    (artist of current track) & lf & (player state as text) & lf & ¬
+                    ((player position) as text) & lf & ¬
+                    ((duration of current track) as text)
             end if
         end tell
     end try
@@ -486,28 +550,192 @@ end if
 return out
 '''
 
+# Which app _get_media_info last read from — album art and transport commands
+# must target that same app.
+_media_app: str | None = None
 
-async def _get_media_info() -> dict | None:
-    """Return {t, a, p} for the current Spotify/Music track on macOS, or None."""
-    if sys.platform != "darwin":
-        return None
+
+async def _osascript(script: str, timeout: float = 5.0):
     try:
-        proc = await asyncio.to_thread(
+        return await asyncio.to_thread(
             subprocess.run,
-            ["osascript", "-e", _MEDIA_APPLESCRIPT],
-            capture_output=True, text=True, timeout=5,
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    parts = proc.stdout.strip().split("\n")
-    if len(parts) < 3 or not parts[0].strip():
+
+
+async def _get_media_info() -> dict | None:
+    """Return {t, a, p[, ps, d]} for the current Spotify/Music track, or None."""
+    global _media_app
+    if sys.platform != "darwin":
         return None
-    title, artist, state = parts[0], parts[1], parts[2].strip().lower()
-    return {
+    _media_app = None
+    proc = await _osascript(_MEDIA_APPLESCRIPT)
+    if proc is None:
+        return None
+    parts = proc.stdout.strip().split("\n")
+    if len(parts) < 4 or not parts[1].strip():
+        return None
+    app, title, artist, state = parts[0].strip(), parts[1], parts[2], parts[3].strip().lower()
+    _media_app = app
+    info = {
         "t": title[:47],
         "a": artist[:31],
         "p": 1 if state == "playing" else 0,
     }
+    # Position/duration, when the player reported a timeline. Sent as whole
+    # seconds; the firmware interpolates between updates.
+    if len(parts) >= 6:
+        try:
+            pos = int(float(parts[4]))
+            dur = int(float(parts[5]))
+            if dur > 0:
+                info["ps"] = max(0, pos)
+                info["d"] = dur
+        except (TypeError, ValueError):
+            pass
+    return info
+
+
+# Device -> host media commands, notified on REQ_CHAR (see ble_send_media_cmd).
+MEDIA_CMD_PLAYPAUSE = 0x10
+MEDIA_CMD_NEXT      = 0x11
+MEDIA_CMD_PREV      = 0x12
+
+_MEDIA_CMD_SCRIPT = {
+    MEDIA_CMD_PLAYPAUSE: "playpause",
+    MEDIA_CMD_NEXT:      "next track",
+    MEDIA_CMD_PREV:      "previous track",
+}
+
+
+async def _media_control(code: int) -> bool:
+    """Apply a transport command from the device to the active player."""
+    app = _media_app
+    if not app:
+        log("Media command ignored: no active player")
+        return False
+    verb = _MEDIA_CMD_SCRIPT.get(code)
+    if not verb:
+        return False
+    proc = await _osascript(f'tell application "{app}" to {verb}')
+    if proc is None or proc.returncode != 0:
+        err = proc.stderr.strip() if proc else "osascript failed"
+        log(f"Media command 0x{code:02x} failed: {err}")
+        return False
+    return True
+
+
+# ---- Album art (SCREEN_MEDIA cover) ----
+# The firmware expects a fixed 96x96 RGB565 image, streamed in "CA"-tagged
+# chunks over the RX characteristic. See ble_take_album_art() in ble.cpp.
+ART_W = ART_H = 96
+
+_MUSIC_ART_SCRIPT = r'''
+on run argv
+    set outPath to item 1 of argv
+    tell application "Music"
+        set d to raw data of artwork 1 of current track
+    end tell
+    set f to open for access (POSIX file outPath) with write permission
+    set eof f to 0
+    write d to f
+    close access f
+end run
+'''
+
+
+def _rgb565_from_bytes(data: bytes) -> bytes | None:
+    """Center-crop, resize to ART_W x ART_H, and pack as little-endian RGB565."""
+    import io as _io
+
+    from PIL import Image
+
+    img = Image.open(_io.BytesIO(data)).convert("RGB")
+    w, h = img.size
+    side = min(w, h)
+    img = img.crop((
+        (w - side) // 2, (h - side) // 2,
+        (w + side) // 2, (h + side) // 2,
+    )).resize((ART_W, ART_H), Image.LANCZOS)
+    px = img.tobytes()
+    out = bytearray(ART_W * ART_H * 2)
+    j = 0
+    for i in range(0, len(px), 3):
+        v = ((px[i] >> 3) << 11) | ((px[i + 1] >> 2) << 5) | (px[i + 2] >> 3)
+        out[j] = v & 0xFF
+        out[j + 1] = (v >> 8) & 0xFF
+        j += 2
+    return bytes(out)
+
+
+async def _fetch_album_art_rgb565() -> bytes | None:
+    """Grab the current track's cover from whichever player _get_media_info chose.
+
+    Spotify exposes an artwork *URL* (fetch it); Music only exposes raw bytes
+    through AppleScript, so we have it dump them to a temp file.
+    """
+    app = _media_app
+    if not app:
+        return None
+    try:
+        if app == "Spotify":
+            proc = await _osascript(
+                'tell application "Spotify" to return artwork url of current track'
+            )
+            url = proc.stdout.strip() if proc else ""
+            if not url.startswith("http"):
+                return None
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.get(url)
+            if resp.status_code != 200:
+                return None
+            data = resp.content
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".art", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    ["osascript", "-e", _MUSIC_ART_SCRIPT, tmp_path],
+                    capture_output=True, text=True, timeout=8,
+                )
+                if proc.returncode != 0:
+                    return None
+                data = Path(tmp_path).read_bytes()
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+        if not data:
+            return None
+        return _rgb565_from_bytes(data)
+    except Exception as e:
+        log(f"Album art fetch failed: {e}")
+        return None
+
+
+async def _send_album_art(client, art: bytes | None) -> bool:
+    """Stream a cover (or a clear frame for None) to the device. True on success."""
+    try:
+        if art is None:
+            await client.write_gatt_char(RX_CHAR_UUID, b"CA\xff\x00", response=True)
+            return True
+        # Chunk to the negotiated MTU (ATT header 3 + our frame header 4). The
+        # floor of 96 keeps chunk_idx comfortably inside one byte.
+        mtu = int(getattr(client, "mtu_size", 0) or 0) or 185
+        chunk = max(96, min(mtu - 7, 480))
+        total = (len(art) + chunk - 1) // chunk
+        for idx in range(total):
+            part = art[idx * chunk:(idx + 1) * chunk]
+            flags = 1 if idx == total - 1 else 0
+            await client.write_gatt_char(
+                RX_CHAR_UUID, bytes((0x43, 0x41, idx, flags)) + part, response=True
+            )
+        return True
+    except (BleakError, OSError, AssertionError) as e:
+        log(f"Album art send failed: {e}")
+        return False
 
 
 def _read_asana_token() -> str | None:
@@ -529,32 +757,47 @@ def _read_asana_token() -> str | None:
     return None
 
 
+def _clamp_series(vals, cap: int) -> list[int]:
+    """Turn a burndown array into small non-negative ints; None/negatives -> -1."""
+    out = []
+    for v in (vals or [])[:cap]:
+        if v is None:
+            out.append(-1)
+        else:
+            try:
+                out.append(max(-1, min(255, int(round(float(v))))))
+            except (TypeError, ValueError):
+                out.append(-1)
+    return out
+
+
 async def _fetch_sprint(asana_token: str) -> dict | None:
-    """Call the Asana MCP get_sprint tool and return {td, dg, dn, tt}, or None."""
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": "get_sprint", "arguments": {"offset": 0}},
-    }
-    headers = {
-        "Authorization": f"Bearer {asana_token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    }
+    """Call the Asana dashboard get_sprint REST tool and return the burndown, or None.
+
+    Returns {sn, td, dg, dn, tt, bi, ba}: sprint name, todo/doing/done counts, and
+    the ideal (bi) + actual (ba) burndown series. Future actual days come back as
+    -1 so the firmware can draw them as gaps.
+    """
+    headers = {"Authorization": f"Bearer {asana_token}"}
+    params = {"tool": "get_sprint", "escopo": "Time"}
     try:
         async with httpx.AsyncClient(timeout=20.0) as http:
-            resp = await http.post(ASANA_MCP_URL, headers=headers, json=payload)
+            resp = await http.get(ASANA_MCP_URL, headers=headers, params=params)
         if resp.status_code != 200:
-            log(f"Asana MCP HTTP {resp.status_code}")
+            log(f"Asana HTTP {resp.status_code}: {resp.text[:120]}")
             return None
-        for line in resp.text.splitlines():
-            if not line.startswith("data: "):
-                continue
-            sc = json.loads(line[6:]).get("result", {}).get("structuredContent", {})
-            if sc:
-                td, dg, dn = sc.get("todo", 0), sc.get("doing", 0), sc.get("done", 0)
-                return {"td": td, "dg": dg, "dn": dn, "tt": td + dg + dn}
+        sc = resp.json()
+        td = int(sc.get("todo", 0) or 0)
+        dg = int(sc.get("doing", 0) or 0)
+        dn = int(sc.get("done", 0) or 0)
+        bi = _clamp_series(sc.get("burndown_ideal"), 14)
+        ba = _clamp_series(sc.get("burndown_actual"), 14)
+        out = {"sn": str(sc.get("sprint", ""))[:15], "td": td, "dg": dg,
+               "dn": dn, "tt": td + dg + dn}
+        if bi:
+            out["bi"] = bi
+            out["ba"] = ba
+        return out
     except Exception as e:
         log(f"Asana poll error: {e}")
     return None

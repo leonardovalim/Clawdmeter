@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from daemon.claude_usage_daemon_windows import AuthError, poll_api
+from daemon.claude_usage_daemon_windows import AuthError, poll_api, _billing_period_info
 
 
 # ---------------------------------------------------------------------------
@@ -33,8 +33,14 @@ def _make_mock_response(status_code=200, headers=None):
 
 
 def _run(coro):
-    """Run a coroutine synchronously for synchronous test functions."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run a coroutine synchronously for synchronous test functions.
+
+    asyncio.run() rather than get_event_loop(): since Python 3.12 the latter
+    only returns a loop when one is already running, and on 3.14 it raises
+    outright ("no current event loop") — which silently killed every test in
+    this module.
+    """
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -453,3 +459,22 @@ def test_poll_api_does_not_log_token(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert secret_token not in captured.out, "Token leaked to stdout (T-02-01 violation)"
     assert secret_token not in captured.err, "Token leaked to stderr (T-02-01 violation)"
+
+
+# ---------------------------------------------------------------------------
+# Test: billing-period math must not blow up on an absent reset header
+# ---------------------------------------------------------------------------
+
+def test_billing_period_info_survives_zero_reset_ts():
+    """reset_ts "0" must degrade, not raise.
+
+    The "ent" branch of poll_api is taken whenever the 5h utilization header is
+    missing, and reset_ts is then the "0" default. Stepping one month back from
+    the epoch lands in 1969, and datetime.timestamp() raises OSError for
+    pre-1970 dates on Windows — which used to take the whole poll loop down.
+    """
+    assert _billing_period_info(time.time(), "0") == {"tp": 0, "pd": 30, "rd": ""}
+
+
+def test_billing_period_info_survives_garbage_reset_ts():
+    assert _billing_period_info(time.time(), "not-a-number") == {"tp": 0, "pd": 30, "rd": ""}

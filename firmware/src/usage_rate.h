@@ -13,3 +13,9 @@ bool usage_rate_sample(float session_pct);
 // 0 = idle, 1 = normal, 2 = active, 3 = heavy.
 // Defaults to 0 when the buffer doesn't have enough samples yet.
 int usage_rate_group(void);
+
+// Current consumption rate in %/hour over the ring-buffer window, for the
+// Pace screen's projection. Returns -1 while the window hasn't warmed up
+// (fewer than 2 samples or less than MIN_WINDOW_MS of history); a negative
+// trend clamps to 0 (the session-reset drop is handled in usage_rate_sample).
+float usage_rate_per_hour(void);

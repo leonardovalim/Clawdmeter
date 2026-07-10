@@ -77,6 +77,15 @@ ASANA_POLL_SECS  = 300          # poll sprint data every 5 min (changes slowly)
 _asana_cache:     dict | None = None
 _asana_last_poll: float       = 0.0
 
+# OAuth token refresh. The credentials file Claude Code writes carries a
+# refreshToken next to the accessToken, so an expired token can be renewed with
+# a silent HTTP call — no browser, no `claude login`. Endpoint and client id are
+# the ones the Claude Code CLI itself uses.
+OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# Renew this long before expiry so a poll never races the expiry boundary.
+TOKEN_REFRESH_MARGIN_S = 300
+
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
@@ -688,6 +697,13 @@ def _billing_period_info(now: float, reset_ts: str) -> dict:
         period_end = float(reset_ts)
     except ValueError:
         return {"tp": 0, "pd": 30, "rd": ""}
+    if period_end <= 0:
+        # The "ent" branch is taken whenever the 5h utilization header is absent
+        # — which also happens on an otherwise-fine 200 that simply carries no
+        # rate-limit headers. reset_ts is then the "0" default, and stepping one
+        # month back from the epoch lands in 1969; datetime.timestamp() raises
+        # OSError for pre-1970 dates on Windows, taking the whole poll loop down.
+        return {"tp": 0, "pd": 30, "rd": ""}
     dt_end = datetime.datetime.fromtimestamp(period_end)
     prev_month = dt_end.month - 1 or 12
     prev_year = dt_end.year if dt_end.month > 1 else dt_end.year - 1
@@ -916,6 +932,130 @@ def read_token() -> str | None:
     return None
 
 
+def _load_credentials() -> tuple[Path, dict] | None:
+    """Return (path, parsed doc) for the first credentials file carrying a
+    `claudeAiOauth` block. Only that shape can be refreshed — a raw-token blob
+    (see _extract_access_token) has no refresh token, so refresh is skipped.
+    """
+    for path in _windows_credential_candidates():
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(doc, dict) and isinstance(doc.get("claudeAiOauth"), dict):
+            return path, doc
+    return None
+
+
+def _write_credentials(path: Path, doc: dict) -> None:
+    """Persist the credentials doc atomically.
+
+    Writes a sibling temp file and os.replace()s it over the original, so a
+    crash mid-write can never leave a truncated credentials file. The temp file
+    lives in the same directory, so it inherits that directory's ACL — which is
+    exactly where the real file's permissions come from (all of its ACEs are
+    inherited), so the swap does not loosen access.
+    """
+    tmp = path.with_name(path.name + ".clawdmeter.tmp")
+    tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def token_needs_refresh() -> bool:
+    """True when the stored access token is expired or about to expire."""
+    loaded = _load_credentials()
+    if not loaded:
+        return False
+    expires_ms = loaded[1]["claudeAiOauth"].get("expiresAt")
+    if not isinstance(expires_ms, (int, float)):
+        return False
+    return time.time() + TOKEN_REFRESH_MARGIN_S >= expires_ms / 1000
+
+
+async def refresh_access_token() -> str | None:
+    """Trade the stored refresh token for a fresh access token, persisting both.
+
+    Returns the new access token, or None if the refresh could not be completed
+    (no refreshable credentials, network/HTTP failure, or an account switch
+    detected mid-flight).
+
+    Account-switch safety: `claude login` rewrites the whole claudeAiOauth block,
+    so a refresh token cached in memory can belong to an account the user has
+    since left. We therefore (a) read the refresh token straight off disk here,
+    never from memory, and (b) re-read the file immediately before writing and
+    abort unless the refresh token is still the one we exchanged. Without that
+    compare-and-swap a slow refresh could clobber the newly-logged-in account's
+    credentials with the previous account's.
+    """
+    loaded = _load_credentials()
+    if not loaded:
+        return None
+    _, doc = loaded
+    oauth = doc["claudeAiOauth"]
+    old_refresh = oauth.get("refreshToken")
+    if not isinstance(old_refresh, str) or not old_refresh:
+        log("Token refresh: credentials carry no refreshToken")
+        return None
+
+    body = {
+        "grant_type": "refresh_token",
+        "refresh_token": old_refresh,
+        "client_id": OAUTH_CLIENT_ID,
+    }
+    # Ask for exactly the scopes this account already holds rather than a
+    # hardcoded list — a work account and a personal account can differ.
+    scopes = oauth.get("scopes")
+    if isinstance(scopes, list) and scopes:
+        body["scope"] = " ".join(scopes)
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.post(OAUTH_TOKEN_URL, json=body)
+    except httpx.HTTPError as e:
+        log(f"Token refresh failed (network): {e}")
+        return None
+    if resp.status_code != 200:
+        # A rejected refresh token is the one case that truly needs `claude login`.
+        log(f"Token refresh rejected: HTTP {resp.status_code}")
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        log("Token refresh: malformed response body")
+        return None
+
+    new_access = data.get("access_token")
+    if not isinstance(new_access, str) or not new_access:
+        log("Token refresh: response carried no access_token")
+        return None
+    # Refresh tokens are usually rotated; fall back to the old one if not.
+    new_refresh = data.get("refresh_token") or old_refresh
+    expires_in = data.get("expires_in")
+
+    latest = _load_credentials()
+    if not latest:
+        return new_access  # cannot persist, but the token is good for this poll
+    latest_path, latest_doc = latest
+    if latest_doc["claudeAiOauth"].get("refreshToken") != old_refresh:
+        # Someone ran `claude login` while we were in flight. Persisting now
+        # would overwrite the new account. Drop ours; next cycle reads theirs.
+        log("Token refresh: credentials changed on disk (account switch?) — discarding")
+        return None
+
+    block = latest_doc["claudeAiOauth"]
+    block["accessToken"] = new_access
+    block["refreshToken"] = new_refresh
+    if isinstance(expires_in, (int, float)):
+        block["expiresAt"] = int((time.time() + expires_in) * 1000)
+    try:
+        _write_credentials(latest_path, latest_doc)
+    except OSError as e:
+        log(f"Token refresh: could not persist credentials: {e}")
+        return new_access  # still usable in memory for this cycle
+    log(f"Token refreshed silently; expires {_read_expiry()}")
+    return new_access
+
+
 def _read_expiry() -> str:
     """Return human-readable expiry from the first-hit credentials file.
 
@@ -1040,6 +1180,11 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
+                # Renew before expiry so a poll never races the boundary. On an
+                # account switch refresh_access_token() bails out, and the
+                # read_token() below picks up whoever is logged in now.
+                if token_needs_refresh():
+                    await refresh_access_token()
                 token = read_token()  # D-09: fresh each cycle
                 if not token:
                     log("No token; skipping poll")
@@ -1049,10 +1194,21 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                     try:
                         payload = await poll_api(token)
                     except AuthError:
-                        # Real 401/403 — token genuinely needs a refresh.
-                        if tray_state:
-                            tray_state.set_error("token expired — run claude login")
+                        # Real 401/403. Before nagging the user, try the silent
+                        # refresh once — this is the ordinary expiry path and
+                        # needs no browser.
+                        refreshed = await refresh_access_token()
                         payload = None
+                        if refreshed:
+                            try:
+                                payload = await poll_api(refreshed)
+                            except AuthError:
+                                refreshed = None
+                        if not refreshed:
+                            # Refresh token itself is dead — only now is a
+                            # human-driven `claude login` actually required.
+                            if tray_state:
+                                tray_state.set_error("token expired — run claude login")
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()

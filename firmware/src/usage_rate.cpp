@@ -58,20 +58,30 @@ bool usage_rate_sample(float session_pct) {
     return was_reset;
 }
 
-int usage_rate_group(void) {
-    if (count < 2) return 0;
+// Rate over the full window in %/min, or -1 while warming up. Shared by the
+// group classifier and the %/hour accessor so the warm-up rule lives once.
+static float rate_pct_per_min(void) {
+    if (count < 2) return -1.0f;
 
     uint8_t o = oldest_idx();
     uint8_t l = (head + RING_SIZE - 1) % RING_SIZE;
     uint32_t dt = ring[l].ms - ring[o].ms;
-    if (dt < MIN_WINDOW_MS) return 0;
+    if (dt < MIN_WINDOW_MS) return -1.0f;
 
     float dp = ring[l].pct - ring[o].pct;
     if (dp < 0.0f) dp = 0.0f;
-    float rate = dp * 60000.0f / (float)dt;
+    return dp * 60000.0f / (float)dt;
+}
 
-    if (rate < RATE_THRESH_NORMAL) return 0;
+int usage_rate_group(void) {
+    float rate = rate_pct_per_min();
+    if (rate < RATE_THRESH_NORMAL) return 0;   // includes the -1 warm-up
     if (rate < RATE_THRESH_ACTIVE) return 1;
     if (rate < RATE_THRESH_HEAVY)  return 2;
     return 3;
+}
+
+float usage_rate_per_hour(void) {
+    float rate = rate_pct_per_min();
+    return (rate < 0.0f) ? -1.0f : rate * 60.0f;
 }

@@ -622,9 +622,13 @@ def test_write_payload_oserror_returns_false_not_raises():
     mock_client.write_gatt_char = AsyncMock(
         side_effect=OSError(-2147023673, "The operation was canceled by the user.")
     )
-    session = Session(mock_client)
 
-    result = _run(session.write_payload({"ok": True}))
+    async def _go():
+        # Session.__init__ grabs the running loop (to hop media commands back
+        # onto it from Bleak's thread), so it must be built inside one.
+        return await Session(mock_client).write_payload({"ok": True})
+
+    result = _run(_go())
 
     assert result is False  # caught and reported, not raised
     assert mock_client.write_gatt_char.call_count == 1
@@ -635,9 +639,11 @@ def test_write_payload_bleak_error_still_returns_false():
     from widening the except to also cover OSError)."""
     mock_client = AsyncMock()
     mock_client.write_gatt_char = AsyncMock(side_effect=BleakError("disconnected"))
-    session = Session(mock_client)
 
-    assert _run(session.write_payload({"ok": True})) is False
+    async def _go():
+        return await Session(mock_client).write_payload({"ok": True})
+
+    assert _run(_go()) is False
 
 
 # ---------------------------------------------------------------------------

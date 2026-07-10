@@ -32,6 +32,15 @@ static void load_creds() {
 }
 
 void sprint_net_provision(const char* ssid, const char* pw, const char* tok) {
+    // Daemon reescreve o blob a cada reconexão BLE (~60s). Se as credenciais
+    // são as mesmas de sempre, derrubar WiFi.disconnect() + WiFi.begin() a
+    // cada vez impede o fetch de terminar — thrash. Só re-associa se algum
+    // dos três campos efetivamente mudou.
+    const bool net_changed = (strcmp(ssid, s_ssid) != 0) || (strcmp(pw, s_pw) != 0);
+    const bool tok_changed = (strcmp(tok, s_tok) != 0);
+    if (!net_changed && !tok_changed) {
+        return;  // idempotente, sem log — evita spam
+    }
     s_prefs.begin("clawdwifi", false);
     s_prefs.putString("ssid", ssid);
     s_prefs.putString("pw",   pw);
@@ -40,9 +49,15 @@ void sprint_net_provision(const char* ssid, const char* pw, const char* tok) {
     strlcpy(s_ssid, ssid, sizeof(s_ssid));
     strlcpy(s_pw,   pw,   sizeof(s_pw));
     strlcpy(s_tok,  tok,  sizeof(s_tok));
-    if (s_ssid[0]) { WiFi.disconnect(); WiFi.begin(s_ssid, s_pw); }
-    s_last_fetch = 0;   // fetch ASAP once connected
-    Serial.printf("sprint_net: provisioned ssid=%s\n", s_ssid);
+    if (net_changed && s_ssid[0]) {
+        WiFi.disconnect();
+        WiFi.begin(s_ssid, s_pw);
+    }
+    if (tok_changed) {
+        s_last_fetch = 0;   // força fetch imediato com o novo token
+    }
+    Serial.printf("sprint_net: provisioned ssid=%s (net_changed=%d tok_changed=%d)\n",
+                  s_ssid, net_changed, tok_changed);
 }
 
 // Parse the {sn,td,dg,dn,tt,bi,ba} object into s_bd.bd_* — mirrors main.cpp:152-184.

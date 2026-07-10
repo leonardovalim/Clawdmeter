@@ -56,14 +56,27 @@ static bool parse_bd(const String& body) {
     s_bd.bd_done  = bd["dn"] | 0;
     s_bd.bd_total = bd["tt"] | 0;
     strlcpy(s_bd.bd_name, bd["sn"] | "", sizeof(s_bd.bd_name));
+    // bd_max é o teto do eixo Y do burndown. O caminho BLE (main.cpp:167-175)
+    // calcula max sobre ideal E actual — se o "actual" ultrapassa o "ideal"
+    // (scope creep no sprint), o gráfico ainda cabe. Espelha essa lógica aqui
+    // pra não divergir.
     JsonArray bi = bd["bi"].as<JsonArray>();
     JsonArray ba = bd["ba"].as<JsonArray>();
     uint8_t n = 0;
-    for (JsonVariant v : bi) { if (n >= BD_MAX_DAYS) break; s_bd.bd_ideal[n++] = v.as<int>(); }
+    uint8_t mx = 0;
+    for (JsonVariant v : bi) {
+        if (n >= BD_MAX_DAYS) break;
+        int iv = v | 0;
+        if (iv < 0) iv = 0;
+        s_bd.bd_ideal[n] = (uint8_t)iv;
+        if (iv > mx) mx = (uint8_t)iv;
+        int av = n < ba.size() ? (ba[n] | -1) : -1;
+        s_bd.bd_actual[n] = (int16_t)av;
+        if (av > mx) mx = (uint8_t)av;
+        n++;
+    }
     s_bd.bd_days = n;
-    s_bd.bd_max  = (n > 0) ? s_bd.bd_ideal[0] : 0;
-    uint8_t m = 0;
-    for (JsonVariant v : ba) { if (m >= BD_MAX_DAYS) break; s_bd.bd_actual[m++] = v.as<int>(); }
+    s_bd.bd_max  = mx;
     s_bd.has_burndown = (n > 0);
     return s_bd.has_burndown;
 }

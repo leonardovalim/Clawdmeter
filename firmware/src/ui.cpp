@@ -81,15 +81,17 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
-        L.pace_arc_size   = 200;
-        L.pace_arc_y      = 80;
-        L.pace_status_y   = 288;
-        L.pace_stat_lbl_y = 326;
-        L.pace_stat_val_y = 350;
+        // Ritmo: arco maior + respiração cirúrgica. Value acima do label
+        // (leitura natural: número grande primeiro, rótulo dim embaixo).
+        L.pace_arc_size   = 208;
+        L.pace_arc_y      = 72;
+        L.pace_status_y   = 304;
+        L.pace_stat_val_y = 342;
+        L.pace_stat_lbl_y = 370;
         L.pace_stat_dx    = 100;
-        L.pace_hm_y       = 388;
-        L.pace_hm_h       = 62;
-        L.pace_axis_y     = 454;
+        L.pace_hm_y       = 400;
+        L.pace_hm_h       = 48;
+        L.pace_axis_y     = 456;
         L.pace_pct_font   = &font_styrene_48;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
@@ -105,15 +107,17 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
+        // Espelha a Proposta A em escala compacta (não é alvo de QA visual,
+        // mas segue o mesmo esqueleto: value → label invertido, mais folga).
         L.pace_arc_size   = 156;
         L.pace_arc_y      = 68;
-        L.pace_status_y   = 240;
-        L.pace_stat_lbl_y = 272;
-        L.pace_stat_val_y = 294;
+        L.pace_status_y   = 252;
+        L.pace_stat_val_y = 288;
+        L.pace_stat_lbl_y = 314;
         L.pace_stat_dx    = 78;
-        L.pace_hm_y       = 330;
-        L.pace_hm_h       = 56;
-        L.pace_axis_y     = 390;
+        L.pace_hm_y       = 344;
+        L.pace_hm_h       = 46;
+        L.pace_axis_y     = 394;
         L.pace_pct_font   = &font_styrene_28;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
@@ -713,9 +717,12 @@ static void init_pace_screen(lv_obj_t* scr) {
     lv_obj_align(lbl_pace_status, LV_ALIGN_TOP_MID, 0, L.pace_status_y);
 
     // Two stat columns: "agora" (current rate) and "pico hoje" (busiest hour).
+    // Valor acima (styrene_24 TEXT, primeira coisa que o olho pega), rótulo
+    // abaixo (styrene_14 DIM, contexto). Inverte a ordem original pra ficar
+    // mais próximo do padrão dashboard/relógio.
     lv_obj_t* now_lbl = lv_label_create(pace_container);
     lv_label_set_text(now_lbl, "agora");
-    lv_obj_set_style_text_font(now_lbl, &font_styrene_16, 0);
+    lv_obj_set_style_text_font(now_lbl, &font_styrene_14, 0);
     lv_obj_set_style_text_color(now_lbl, COL_DIM, 0);
     lv_obj_align(now_lbl, LV_ALIGN_TOP_MID, -L.pace_stat_dx, L.pace_stat_lbl_y);
 
@@ -727,7 +734,7 @@ static void init_pace_screen(lv_obj_t* scr) {
 
     lv_obj_t* peak_lbl = lv_label_create(pace_container);
     lv_label_set_text(peak_lbl, "pico hoje");
-    lv_obj_set_style_text_font(peak_lbl, &font_styrene_16, 0);
+    lv_obj_set_style_text_font(peak_lbl, &font_styrene_14, 0);
     lv_obj_set_style_text_color(peak_lbl, COL_DIM, 0);
     lv_obj_align(peak_lbl, LV_ALIGN_TOP_MID, L.pace_stat_dx, L.pace_stat_lbl_y);
 

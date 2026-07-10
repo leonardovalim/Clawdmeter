@@ -304,7 +304,7 @@ static ble_state_t last_ble_state = BLE_STATE_INIT;
 
 // Map the IMU rotation quadrant to a screen. Runs every loop after imu_hal_tick().
 // Quadrant → screen: 0 portrait=Usage, 1 landscape-right=Media,
-//                    2 upside-down=Stats, 3 landscape-left=Burndown.
+//                    2 upside-down=Pace, 3 landscape-left=Burndown.
 // Ignored while on SCREEN_SPLASH so the boot animation survives a tilted desk.
 static void imu_screen_tick(void) {
     if (ui_get_current_screen() == SCREEN_SPLASH) return;
@@ -313,7 +313,7 @@ static void imu_screen_tick(void) {
     if (q == last_q || q > 3) return;
     last_q = q;
     static const screen_t qmap[4] = {
-        SCREEN_USAGE, SCREEN_MEDIA, SCREEN_STATS, SCREEN_BURNDOWN
+        SCREEN_USAGE, SCREEN_MEDIA, SCREEN_PACE, SCREEN_BURNDOWN
     };
     ui_show_screen(qmap[q]);
 }

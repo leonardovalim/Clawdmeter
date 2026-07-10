@@ -666,6 +666,13 @@ def _billing_period_info(now: float, reset_ts: str) -> dict:
         period_end = float(reset_ts)
     except ValueError:
         return {"tp": 0, "pd": 30, "rd": ""}
+    if period_end <= 0:
+        # The "ent" branch is taken whenever the 5h utilization header is absent
+        # — which also happens on an otherwise-fine 200 that simply carries no
+        # rate-limit headers. reset_ts is then the "0" default, and stepping one
+        # month back from the epoch lands in 1969; datetime.timestamp() raises
+        # OSError for pre-1970 dates on Windows, taking the whole poll loop down.
+        return {"tp": 0, "pd": 30, "rd": ""}
     dt_end = datetime.datetime.fromtimestamp(period_end)
     prev_month = dt_end.month - 1 or 12
     prev_year = dt_end.year if dt_end.month > 1 else dt_end.year - 1

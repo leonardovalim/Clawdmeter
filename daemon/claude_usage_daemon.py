@@ -917,6 +917,12 @@ def _billing_period_info(now: float, reset_ts: str) -> dict:
         period_end = float(reset_ts)
     except ValueError:
         return {"tp": 0, "pd": 30}
+    if period_end <= 0:
+        # Reached whenever the 5h utilization header is absent and reset_ts is
+        # the "0" default: there is no billing period to report. Stepping a month
+        # back from the epoch lands in 1969, which is merely nonsense here but
+        # raises OSError on the Windows daemon — guard both the same way.
+        return {"tp": 0, "pd": 30}
     dt_end = datetime.datetime.fromtimestamp(period_end)
     prev_month = dt_end.month - 1 or 12
     prev_year = dt_end.year if dt_end.month > 1 else dt_end.year - 1

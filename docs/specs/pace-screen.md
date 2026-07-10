@@ -138,6 +138,35 @@ pastas de board.
 Cada etapa compila nos 4 envs (`waveshare_amoled_216`, `waveshare_amoled_18`,
 `waveshare_amoled_216_c6`, `waveshare_amoled_18_c6`) antes do commit.
 
+## Notas para o implementador
+
+Âncoras no código na data desta espec (linhas aproximadas, use como ponto de
+partida de leitura, não como verdade absoluta):
+
+- **Padrão do gauge**: copiar o `arc_cache` de `init_stats_screen()` —
+  `firmware/src/ui.cpp:521` (rotação 135, bg 0–270, knob transparente,
+  `CLICKABLE` removido).
+- **Heatmap a fatorar**: `update_heatmap_bars()` em `firmware/src/ui.cpp:488` e
+  a construção das 24 barras logo adiante em `init_stats_screen()`. As duas
+  telas devem usar os mesmos arrays/helpers parametrizados por container.
+- **Layout responsivo**: `struct Layout` em `firmware/src/ui.cpp:31` e
+  `compute_layout()` em `ui.cpp:59` — campos novos entram ali, nunca números
+  mágicos espalhados pela tela.
+- **Ponto de atualização**: `ui_update()` em `firmware/src/ui.cpp:933` — seguir
+  o padrão das outras telas (atualiza labels/arcos só quando o container existe).
+- **Mapa de quadrantes**: `qmap` em `firmware/src/main.cpp:315`.
+- **Ritmo**: ring buffer e janela em `firmware/src/usage_rate.cpp` — a nova
+  `usage_rate_per_hour()` reaproveita `oldest_idx()`/`MIN_WINDOW_MS`; não
+  duplicar a lógica de reset de sessão.
+- **Regras do projeto** (`CLAUDE.md`): nenhum `#ifdef BOARD_*` em código
+  compartilhado; cores só via `theme.h`; fontes já compiladas (não gerar fonte
+  nova); tap centralizado (não ler o controlador de toque fora de `touch.cpp`).
+- **QA**: bootar temporariamente em `SCREEN_PACE` (trocar
+  `ui_show_screen(SCREEN_SPLASH)` em `main.cpp:297`), `./screenshot.sh out.png`,
+  conferir o PNG com os próprios olhos, reverter antes do commit. Compilar os
+  4 envs antes de cada commit:
+  `pio run -d firmware -e waveshare_amoled_216` (e `_18`, `_216_c6`, `_18_c6`).
+
 ## Fora de escopo / follow-ups
 
 - `hm` (heatmap horário) no daemon bash — hoje só os daemons Python enviam.

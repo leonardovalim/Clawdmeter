@@ -141,6 +141,16 @@ def test_read_expiry_non_dict_json_returns_unknown(tmp_path, monkeypatch):
 
 # --- WR-02: D-06 redaction requirement must be tested ---
 
+# The warning under test is emitted only when sys.platform != "win32" (see the
+# __main__ guard in the daemon), so on Windows these two can never pass: they
+# spawn the real daemon and wait for a line it is designed not to print.
+_non_windows_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="asserts the Linux/WSL BLE warning, which the daemon only prints off-Windows",
+)
+
+
+@_non_windows_only
 def test_main_emits_linux_warning(monkeypatch):
     """__main__ prints a non-fatal stderr warning on non-Windows platforms (new async runner).
 
@@ -172,6 +182,7 @@ def test_main_emits_linux_warning(monkeypatch):
         )
 
 
+@_non_windows_only
 def test_main_emits_linux_warning_before_loop(monkeypatch):
     """__main__ stderr warning appears before the async scan loop starts on Linux/WSL."""
     import signal as _signal

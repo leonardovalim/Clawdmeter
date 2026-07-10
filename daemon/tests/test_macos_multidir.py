@@ -124,7 +124,12 @@ def test_poll_active_payload_picks_active_and_skips_tokenless(monkeypatch):
     sel = PlanSelector()
     with patch.object(mod, "poll_api", new=AsyncMock(side_effect=fake_poll)):
         payload = _run(mod.poll_active_payload(sel))
-    assert payload == {"s": 25, "ok": True}  # only A had a token
+    # Assert on what this test is about — the selection — rather than the exact
+    # dict: poll_active_payload decorates the chosen plan's payload (it appends
+    # `hm`, and will append more), so an equality check rots on every new field.
+    assert payload is not None  # only A had a token
+    assert payload["s"] == 25
+    assert payload["ok"] is True
 
 
 def test_poll_active_payload_returns_none_when_all_fail(monkeypatch):

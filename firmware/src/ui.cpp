@@ -42,6 +42,9 @@ struct Layout {
     int16_t usage_reset_y;
 
     // Pace screen
+    int16_t pace_title_y;     // Ritmo tem título subido: Tiempos 56 acaba em
+                              // ~y=86 e o arco fica logo abaixo — colide se
+                              // o título usar o title_y padrão (30).
     int16_t pace_arc_size;
     int16_t pace_arc_y;
     int16_t pace_status_y;
@@ -81,11 +84,13 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
-        // Ritmo: arco maior + respiração cirúrgica. Value acima do label
-        // (leitura natural: número grande primeiro, rótulo dim embaixo).
-        L.pace_arc_size   = 208;
-        L.pace_arc_y      = 72;
-        L.pace_status_y   = 304;
+        // Ritmo: respiração + inversão value/label. Título sobe 10px, arco
+        // volta a 200 e desce 16 pra abrir 12px acima dele (Tiempos 56 tem
+        // descender longo — antes colava no topo do arco).
+        L.pace_title_y    = 20;
+        L.pace_arc_size   = 200;
+        L.pace_arc_y      = 88;
+        L.pace_status_y   = 308;
         L.pace_stat_val_y = 342;
         L.pace_stat_lbl_y = 370;
         L.pace_stat_dx    = 100;
@@ -109,8 +114,9 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_reset_y = 78;
         // Espelha a Proposta A em escala compacta (não é alvo de QA visual,
         // mas segue o mesmo esqueleto: value → label invertido, mais folga).
+        L.pace_title_y    = 16;
         L.pace_arc_size   = 156;
-        L.pace_arc_y      = 68;
+        L.pace_arc_y      = 76;
         L.pace_status_y   = 252;
         L.pace_stat_val_y = 288;
         L.pace_stat_lbl_y = 314;
@@ -680,7 +686,7 @@ static void init_pace_screen(lv_obj_t* scr) {
     lv_label_set_text(title, "Ritmo");
     lv_obj_set_style_text_font(title, &font_tiempos_56, 0);
     lv_obj_set_style_text_color(title, COL_TEXT, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, L.title_y);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, L.pace_title_y);
 
     // Projection gauge — same ¾-circle geometry as the Stats cache ring.
     arc_pace = lv_arc_create(pace_container);

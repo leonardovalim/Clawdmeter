@@ -150,6 +150,8 @@ static bool parse_json(const char* json, UsageData* out) {
     }
 
     // Burndown screen
+    out->bd_source_wifi = false;   // acabou de vir do BLE — sprint_net_get
+                                   // vira pra true depois se sobrescrever.
     JsonObject bd = doc["bd"];
     if (bd) {
         out->has_burndown = true;

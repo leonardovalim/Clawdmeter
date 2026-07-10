@@ -139,6 +139,7 @@ bool sprint_net_get(UsageData* out) {
     strlcpy(out->bd_name, s_bd.bd_name, sizeof(out->bd_name));
     memcpy(out->bd_ideal,  s_bd.bd_ideal,  sizeof(out->bd_ideal));
     memcpy(out->bd_actual, s_bd.bd_actual, sizeof(out->bd_actual));
+    out->bd_source_wifi = true;   // badge do Burndown mostra a fonte
     return true;
 }
 #else   // no WiFi on this board — empty stubs so shared callers link

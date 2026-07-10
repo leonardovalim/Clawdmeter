@@ -204,6 +204,7 @@ static lv_obj_t* lbl_bd_doing       = nullptr;
 static lv_obj_t* lbl_bd_done        = nullptr;
 static lv_obj_t* lbl_bd_nothing     = nullptr;
 static lv_obj_t* lbl_bd_sprint      = nullptr;  // "Sprint 32" subtitle
+static lv_obj_t* lbl_bd_source      = nullptr;  // badge "WiFi"/"BLE" da fonte do bd
 static lv_obj_t* chart_bd           = nullptr;  // burndown line chart
 static lv_chart_series_t* ser_bd_ideal  = nullptr;
 static lv_chart_series_t* ser_bd_actual = nullptr;
@@ -1021,6 +1022,17 @@ static void init_burndown_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_bd_sprint, COL_DIM, 0);
     lv_obj_align(lbl_bd_sprint, LV_ALIGN_TOP_MID, 0, L.title_y + 42);
 
+    // Badge minúsculo mostrando de onde veio o bd_*: verde "WiFi" quando o
+    // arbiter em main.cpp:490-502 sobrescreve com um fetch fresco da Vercel,
+    // dim "BLE" quando fica o payload do daemon. Serve pra QA visual do
+    // fallback e pra usuário testar E2E o path WiFi.
+    lbl_bd_source = lv_label_create(burndown_container);
+    lv_label_set_text(lbl_bd_source, "");
+    lv_obj_set_style_text_font(lbl_bd_source, &font_styrene_12, 0);
+    lv_obj_set_style_text_color(lbl_bd_source, COL_DIM, 0);
+    lv_obj_align(lbl_bd_source, LV_ALIGN_TOP_MID, 0, L.title_y + 66);
+    lv_obj_add_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
+
     lbl_bd_nothing = lv_label_create(burndown_container);
     lv_label_set_text(lbl_bd_nothing, "No sprint data");
     lv_obj_set_style_text_font(lbl_bd_nothing, &font_styrene_28, 0);
@@ -1378,8 +1390,14 @@ void ui_update(const UsageData* data) {
             if (data->bd_name[0]) {
                 lv_label_set_text(lbl_bd_sprint, data->bd_name);
                 lv_obj_clear_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
+                lv_label_set_text(lbl_bd_source,
+                                  data->bd_source_wifi ? "WiFi" : "BLE");
+                lv_obj_set_style_text_color(lbl_bd_source,
+                    data->bd_source_wifi ? COL_GREEN : COL_DIM, 0);
+                lv_obj_clear_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
             } else {
                 lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
             }
 
             // Burndown chart: plot ideal + actual; future actual points are gaps.
@@ -1405,6 +1423,7 @@ void ui_update(const UsageData* data) {
             lv_label_set_text(lbl_bd_done,  "--");
             lv_obj_add_flag(chart_bd,      LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
         }
     }
 }

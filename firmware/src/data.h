@@ -42,4 +42,6 @@ struct UsageData {
     uint8_t bd_ideal[BD_MAX_DAYS];   // ideal remaining per day
     int16_t bd_actual[BD_MAX_DAYS];  // actual remaining per day; -1 = future/no data
     uint8_t bd_max;          // Y-axis top (usually bd_ideal[0]); 0 = no series
+    bool    bd_source_wifi;  // true = último bd_* veio do fetch WiFi/Vercel;
+                             // false = BLE (fresco ou cache do último payload)
 };

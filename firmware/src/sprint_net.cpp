@@ -106,7 +106,14 @@ static void fetch_now() {
     http.setTimeout(8000);
     int code = http.GET();
     if (code == 200) {
-        if (parse_bd(http.getString())) { s_have = true; s_last_ok = millis(); }
+        if (parse_bd(http.getString())) {
+            s_have = true;
+            s_last_ok = millis();
+            Serial.printf("sprint_net: fetch 200 OK (%s, %u/%u/%u/%u)\n",
+                s_bd.bd_name, s_bd.bd_todo, s_bd.bd_doing, s_bd.bd_done, s_bd.bd_total);
+        } else {
+            Serial.println("sprint_net: fetch 200 mas parse_bd falhou");
+        }
     } else {
         Serial.printf("sprint_net: HTTP %d\n", code);
     }
@@ -129,6 +136,25 @@ void sprint_net_tick(void) {
     }
 }
 
+void sprint_net_debug_status(void) {
+    uint32_t now = millis();
+    Serial.printf("=== sprint_net status ===\n");
+    Serial.printf("  ssid nvs: '%s'\n", s_ssid);
+    Serial.printf("  tok len : %u\n", (unsigned)strlen(s_tok));
+    Serial.printf("  WiFi status: %d (WL_CONNECTED=3)\n", WiFi.status());
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("  IP: %s  RSSI: %d\n",
+            WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    }
+    Serial.printf("  s_have=%d s_last_ok=%u (idade=%u ms) s_last_fetch=%u\n",
+        s_have, s_last_ok, s_last_ok ? now - s_last_ok : 0, s_last_fetch);
+    if (s_have) {
+        Serial.printf("  bd: sn='%s' td=%u dg=%u dn=%u tt=%u days=%u\n",
+            s_bd.bd_name, s_bd.bd_todo, s_bd.bd_doing, s_bd.bd_done,
+            s_bd.bd_total, s_bd.bd_days);
+    }
+}
+
 bool sprint_net_get(UsageData* out) {
     if (!s_have) return false;
     if (millis() - s_last_ok > SPRINT_FRESH_MS) return false;
@@ -148,4 +174,5 @@ void sprint_net_init(void) {}
 void sprint_net_tick(void) {}
 void sprint_net_provision(const char*, const char*, const char*) {}
 bool sprint_net_get(UsageData*) { return false; }
+void sprint_net_debug_status(void) { Serial.println("sprint_net: sem WiFi neste board"); }
 #endif

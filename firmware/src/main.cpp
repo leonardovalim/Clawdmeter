@@ -190,13 +190,16 @@ static bool parse_json(const char* json, UsageData* out) {
     return true;
 }
 
-// Compare only the bd_* (burndown) fields of two UsageData snapshots. Used to
-// decide whether a freshly-fetched WiFi Sprint actually changed anything
-// worth a redraw (see the WiFi/BLE arbitration in loop()).
+// Compare only os campos bd_* de duas fotos de UsageData. Usado pelo
+// arbiter WiFi/BLE em loop() pra decidir se um fetch WiFi fresco mudou
+// alguma coisa que valha redraw. bd_source_wifi ENTRA na comparação: sem
+// isso o badge nunca flipa de BLE→WiFi quando os números coincidem (o
+// caso comum, já que a Vercel entrega o mesmo shape do daemon).
 static bool bd_snapshot_equal(const UsageData& a, const UsageData& b) {
     return a.bd_todo == b.bd_todo && a.bd_doing == b.bd_doing &&
            a.bd_done == b.bd_done && a.bd_total == b.bd_total &&
            a.bd_days == b.bd_days && a.bd_max == b.bd_max &&
+           a.bd_source_wifi == b.bd_source_wifi &&
            strncmp(a.bd_name, b.bd_name, sizeof(a.bd_name)) == 0 &&
            memcmp(a.bd_ideal,  b.bd_ideal,  sizeof(a.bd_ideal))  == 0 &&
            memcmp(a.bd_actual, b.bd_actual, sizeof(a.bd_actual)) == 0;
@@ -252,6 +255,7 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            else if (strcmp(cmd_buf, "wifi") == 0)  sprint_net_debug_status();
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;

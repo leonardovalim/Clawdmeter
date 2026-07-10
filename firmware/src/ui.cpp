@@ -41,6 +41,18 @@ struct Layout {
     int16_t usage_bar_y;
     int16_t usage_reset_y;
 
+    // Pace screen
+    int16_t pace_arc_size;
+    int16_t pace_arc_y;
+    int16_t pace_status_y;
+    int16_t pace_stat_lbl_y;
+    int16_t pace_stat_val_y;
+    int16_t pace_stat_dx;     // horizontal offset of each stat column from center
+    int16_t pace_hm_y;
+    int16_t pace_hm_h;
+    int16_t pace_axis_y;
+    const lv_font_t* pace_pct_font;
+
     // Bluetooth screen
     int16_t bt_info_panel_h;
     int16_t bt_reset_zone_h;
@@ -69,6 +81,16 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 16;
         L.usage_bar_y = 56;
         L.usage_reset_y = 94;
+        L.pace_arc_size   = 200;
+        L.pace_arc_y      = 80;
+        L.pace_status_y   = 288;
+        L.pace_stat_lbl_y = 326;
+        L.pace_stat_val_y = 350;
+        L.pace_stat_dx    = 100;
+        L.pace_hm_y       = 388;
+        L.pace_hm_h       = 62;
+        L.pace_axis_y     = 454;
+        L.pace_pct_font   = &font_styrene_48;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -83,6 +105,16 @@ static void compute_layout(const BoardCaps& c) {
         L.usage_panel_gap = 12;
         L.usage_bar_y = 48;
         L.usage_reset_y = 78;
+        L.pace_arc_size   = 156;
+        L.pace_arc_y      = 68;
+        L.pace_status_y   = 240;
+        L.pace_stat_lbl_y = 272;
+        L.pace_stat_val_y = 294;
+        L.pace_stat_dx    = 78;
+        L.pace_hm_y       = 330;
+        L.pace_hm_h       = 56;
+        L.pace_axis_y     = 390;
+        L.pace_pct_font   = &font_styrene_28;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -121,6 +153,18 @@ static lv_obj_t* stats_container    = nullptr;
 static lv_obj_t* arc_cache          = nullptr;
 static lv_obj_t* lbl_cache_pct      = nullptr;
 static lv_obj_t* lbl_cache_sub      = nullptr;
+
+// ---- Pace screen (SCREEN_PACE) ----
+static lv_obj_t* pace_container     = nullptr;
+static lv_obj_t* arc_pace           = nullptr;
+static lv_obj_t* lbl_pace_pct       = nullptr;
+static lv_obj_t* lbl_pace_sub       = nullptr;
+static lv_obj_t* lbl_pace_status    = nullptr;
+static lv_obj_t* lbl_pace_now_val   = nullptr;
+static lv_obj_t* lbl_pace_peak_val  = nullptr;
+static Heatmap   hm_pace = {};
+// %/hour from usage_rate_per_hour(), pushed by main.cpp. -1 = still warming up.
+static float     pace_rate = -1.0f;
 
 // ---- Media screen (SCREEN_MEDIA) ----
 static lv_obj_t* media_container    = nullptr;
@@ -592,6 +636,208 @@ static void init_stats_screen(lv_obj_t* scr) {
     heatmap_build(&hm_stats, stats_container, 295, 110);
 }
 
+// ======== Pace screen ========
+
+void ui_set_usage_rate(float pct_per_hour) { pace_rate = pct_per_hour; }
+
+// Absolute local wall-clock as "14:32" or "2:32 PM", per the daemon's clock_fmt.
+static void fmt_clock(long epoch, char* buf, size_t len) {
+    time_t t = (time_t)epoch;
+    struct tm tmv;
+    gmtime_r(&t, &tmv);   // epoch is already local wall-clock → gmtime keeps it
+    if (clock_fmt == 12) {
+        int h12 = tmv.tm_hour % 12;
+        if (h12 == 0) h12 = 12;
+        snprintf(buf, len, "%d:%02d %s", h12, tmv.tm_min, tmv.tm_hour < 12 ? "AM" : "PM");
+    } else {
+        snprintf(buf, len, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+    }
+}
+
+// "3h42" / "42min" — used when the daemon supplies no wall clock (epoch == 0).
+static void fmt_rel(int mins, char* buf, size_t len) {
+    if (mins < 60) snprintf(buf, len, "%dmin", mins);
+    else           snprintf(buf, len, "%dh%02d", mins / 60, mins % 60);
+}
+
+static void init_pace_screen(lv_obj_t* scr) {
+    pace_container = lv_obj_create(scr);
+    lv_obj_set_size(pace_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(pace_container, 0, 0);
+    lv_obj_set_style_bg_color(pace_container, COL_BG, 0);
+    lv_obj_set_style_bg_opa(pace_container, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(pace_container, 0, 0);
+    lv_obj_set_style_pad_all(pace_container, 0, 0);
+    lv_obj_clear_flag(pace_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(pace_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(pace_container, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t* title = lv_label_create(pace_container);
+    lv_label_set_text(title, "Ritmo");
+    lv_obj_set_style_text_font(title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, L.title_y);
+
+    // Projection gauge — same ¾-circle geometry as the Stats cache ring.
+    arc_pace = lv_arc_create(pace_container);
+    lv_obj_set_size(arc_pace, L.pace_arc_size, L.pace_arc_size);
+    lv_obj_align(arc_pace, LV_ALIGN_TOP_MID, 0, L.pace_arc_y);
+    lv_arc_set_rotation(arc_pace, 135);
+    lv_arc_set_bg_angles(arc_pace, 0, 270);
+    lv_arc_set_range(arc_pace, 0, 100);
+    lv_arc_set_value(arc_pace, 0);
+    lv_obj_set_style_arc_color(arc_pace, COL_BAR_BG, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc_pace, 16, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc_pace, COL_GREEN, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(arc_pace, 16, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(arc_pace, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(arc_pace, 0, LV_PART_KNOB);
+    lv_obj_clear_flag(arc_pace, LV_OBJ_FLAG_CLICKABLE);
+
+    lbl_pace_pct = lv_label_create(pace_container);
+    lv_label_set_text(lbl_pace_pct, "--");
+    lv_obj_set_style_text_font(lbl_pace_pct, L.pace_pct_font, 0);
+    lv_obj_set_style_text_color(lbl_pace_pct, COL_TEXT, 0);
+    lv_obj_align_to(lbl_pace_pct, arc_pace, LV_ALIGN_CENTER, 0, -8);
+
+    lbl_pace_sub = lv_label_create(pace_container);
+    lv_label_set_text(lbl_pace_sub, "até o reset");
+    lv_obj_set_style_text_font(lbl_pace_sub, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(lbl_pace_sub, COL_DIM, 0);
+    lv_obj_align_to(lbl_pace_sub, arc_pace, LV_ALIGN_CENTER, 0, 28);
+
+    lbl_pace_status = lv_label_create(pace_container);
+    lv_label_set_text(lbl_pace_status, "Sem dados");
+    lv_obj_set_style_text_font(lbl_pace_status, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(lbl_pace_status, COL_DIM, 0);
+    lv_obj_align(lbl_pace_status, LV_ALIGN_TOP_MID, 0, L.pace_status_y);
+
+    // Two stat columns: "agora" (current rate) and "pico hoje" (busiest hour).
+    lv_obj_t* now_lbl = lv_label_create(pace_container);
+    lv_label_set_text(now_lbl, "agora");
+    lv_obj_set_style_text_font(now_lbl, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(now_lbl, COL_DIM, 0);
+    lv_obj_align(now_lbl, LV_ALIGN_TOP_MID, -L.pace_stat_dx, L.pace_stat_lbl_y);
+
+    lbl_pace_now_val = lv_label_create(pace_container);
+    lv_label_set_text(lbl_pace_now_val, "--");
+    lv_obj_set_style_text_font(lbl_pace_now_val, &font_styrene_24, 0);
+    lv_obj_set_style_text_color(lbl_pace_now_val, COL_TEXT, 0);
+    lv_obj_align(lbl_pace_now_val, LV_ALIGN_TOP_MID, -L.pace_stat_dx, L.pace_stat_val_y);
+
+    lv_obj_t* peak_lbl = lv_label_create(pace_container);
+    lv_label_set_text(peak_lbl, "pico hoje");
+    lv_obj_set_style_text_font(peak_lbl, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(peak_lbl, COL_DIM, 0);
+    lv_obj_align(peak_lbl, LV_ALIGN_TOP_MID, L.pace_stat_dx, L.pace_stat_lbl_y);
+
+    lbl_pace_peak_val = lv_label_create(pace_container);
+    lv_label_set_text(lbl_pace_peak_val, "--");
+    lv_obj_set_style_text_font(lbl_pace_peak_val, &font_styrene_24, 0);
+    lv_obj_set_style_text_color(lbl_pace_peak_val, COL_TEXT, 0);
+    lv_obj_align(lbl_pace_peak_val, LV_ALIGN_TOP_MID, L.pace_stat_dx, L.pace_stat_val_y);
+
+    heatmap_build(&hm_pace, pace_container, L.pace_hm_y, L.pace_hm_h);
+
+    struct { const char* txt; lv_align_t al; int dx; } axis[3] = {
+        { "0h",  LV_ALIGN_TOP_LEFT,  L.margin },
+        { "12h", LV_ALIGN_TOP_MID,   0        },
+        { "23h", LV_ALIGN_TOP_RIGHT, -L.margin },
+    };
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t* t = lv_label_create(pace_container);
+        lv_label_set_text(t, axis[i].txt);
+        lv_obj_set_style_text_font(t, &font_styrene_12, 0);
+        lv_obj_set_style_text_color(t, COL_DIM, 0);
+        lv_obj_align(t, axis[i].al, axis[i].dx, L.pace_axis_y);
+    }
+}
+
+static void update_pace_screen(const UsageData* data) {
+    if (!pace_container) return;
+
+    // Busiest hour today; strict > keeps the earliest on a tie. All-zero (the
+    // bash daemon, which sends no `hm`) reads as "no data".
+    int peak_h = -1, peak_v = 0;
+    for (int i = 0; i < 24; i++) {
+        if (data->hourly[i] > peak_v) { peak_v = data->hourly[i]; peak_h = i; }
+    }
+    if (peak_h < 0) lv_label_set_text(lbl_pace_peak_val, "--");
+    else            lv_label_set_text_fmt(lbl_pace_peak_val, "%dh", peak_h);
+
+    const bool warming = (pace_rate < 0.0f);
+    if (warming) lv_label_set_text(lbl_pace_now_val, "--");
+    else         lv_label_set_text_fmt(lbl_pace_now_val, "%d%%/h", (int)(pace_rate + 0.5f));
+
+    // "reset 16:10" (wall clock) or "reset em 3h42" (daemon without a clock).
+    // Empty when there's no reset value at all (session_reset_mins == -1).
+    char reset[24];
+    const int mins = data->session_reset_mins;
+    if (mins < 0)                    reset[0] = '\0';
+    else if (data->clock_epoch > 0) { char t[12]; fmt_clock(data->clock_epoch + (long)mins * 60, t, sizeof(t));
+                                      snprintf(reset, sizeof(reset), " · reset %s", t); }
+    else                            { char r[12]; fmt_rel(mins, r, sizeof(r));
+                                      snprintf(reset, sizeof(reset), " · reset em %s", r); }
+
+    char status[56];
+    lv_color_t col = COL_ACCENT;
+    int gauge;
+
+    if (data->enterprise) {
+        // Monthly spending, not a 5h window — the projection model doesn't apply.
+        gauge = (int)(data->session_pct + 0.5f);
+        snprintf(status, sizeof(status), "Reset %s", data->reset_date);
+        col = COL_DIM;
+    } else if (warming || mins < 0) {
+        gauge = (int)(data->session_pct + 0.5f);
+        snprintf(status, sizeof(status), "%s%s",
+                 warming ? "Medindo ritmo…" : "Sem projeção", reset);
+        col = COL_DIM;
+    } else {
+        float proj = data->session_pct + pace_rate * (float)mins / 60.0f;
+        if (proj < 0.0f)   proj = 0.0f;
+        if (proj > 100.0f) proj = 100.0f;
+        gauge = (int)(proj + 0.5f);
+
+        if (gauge >= 100 && pace_rate > 0.0f) {
+            col = COL_RED;
+            // Hits 100% this many hours from now, at the current rate.
+            float hrs = (100.0f - data->session_pct) / pace_rate;
+            if (hrs < 0.0f) hrs = 0.0f;   // already at/over 100
+            int   out_mins = (int)(hrs * 60.0f + 0.5f);
+            if (data->clock_epoch > 0) {
+                char t[12];
+                fmt_clock(data->clock_epoch + (long)out_mins * 60, t, sizeof(t));
+                snprintf(status, sizeof(status), "Esgota ~%s%s", t, reset);
+            } else {
+                char r[12];
+                fmt_rel(out_mins, r, sizeof(r));
+                snprintf(status, sizeof(status), "Esgota em ~%s%s", r, reset);
+            }
+        } else if (gauge >= 100) {
+            // At/over 100 with a non-positive rate (session_pct itself already
+            // maxed): red, but no ETA to compute.
+            col = COL_RED;
+            snprintf(status, sizeof(status), "No limite%s", reset);
+        } else if (gauge >= 85) {
+            col = COL_AMBER;
+            snprintf(status, sizeof(status), "No limite%s", reset);
+        } else {
+            col = COL_GREEN;
+            snprintf(status, sizeof(status), "No ritmo%s", reset);
+        }
+    }
+
+    lv_arc_set_value(arc_pace, gauge);
+    lv_obj_set_style_arc_color(arc_pace, col, LV_PART_INDICATOR);
+    lv_label_set_text_fmt(lbl_pace_pct, "%d%%", gauge);
+    lv_label_set_text(lbl_pace_status, status);
+    lv_obj_set_style_text_color(lbl_pace_status, col, 0);
+    lv_obj_align(lbl_pace_status, LV_ALIGN_TOP_MID, 0, L.pace_status_y);
+
+    heatmap_update(&hm_pace, data);
+}
+
 // ======== Media screen ========
 
 static void init_media_screen(lv_obj_t* scr) {
@@ -907,6 +1153,7 @@ void ui_init(void) {
 
     init_usage_screen(scr);
     init_stats_screen(scr);
+    init_pace_screen(scr);
     init_media_screen(scr);
     init_burndown_screen(scr);
     splash_init(scr);
@@ -1043,6 +1290,9 @@ void ui_update(const UsageData* data) {
         }
     }
     heatmap_update(&hm_stats, data);
+
+    // ---- Pace screen ----
+    update_pace_screen(data);
 
     // ---- Media screen ----
     if (media_container) {
@@ -1279,6 +1529,7 @@ void ui_show_screen(screen_t screen) {
     // Hide all content containers
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     if (stats_container)    lv_obj_add_flag(stats_container,    LV_OBJ_FLAG_HIDDEN);
+    if (pace_container)     lv_obj_add_flag(pace_container,     LV_OBJ_FLAG_HIDDEN);
     if (media_container)    lv_obj_add_flag(media_container,    LV_OBJ_FLAG_HIDDEN);
     if (burndown_container) lv_obj_add_flag(burndown_container, LV_OBJ_FLAG_HIDDEN);
     if (lbl_anim)           lv_obj_add_flag(lbl_anim,           LV_OBJ_FLAG_HIDDEN);
@@ -1293,6 +1544,9 @@ void ui_show_screen(screen_t screen) {
         break;
     case SCREEN_STATS:
         if (stats_container)    lv_obj_clear_flag(stats_container,    LV_OBJ_FLAG_HIDDEN);
+        break;
+    case SCREEN_PACE:
+        if (pace_container)     lv_obj_clear_flag(pace_container,     LV_OBJ_FLAG_HIDDEN);
         break;
     case SCREEN_MEDIA:
         if (media_container)    lv_obj_clear_flag(media_container,    LV_OBJ_FLAG_HIDDEN);

@@ -472,6 +472,9 @@ void loop() {
                     g_before, g_after, usage.session_pct);
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
+            // Sampled just above, so the Pace screen projects off the freshest
+            // window. -1 until the rate window warms up (~4 min).
+            ui_set_usage_rate(usage_rate_per_hour());
             ui_update(&usage);
             ble_send_ack();
         } else {

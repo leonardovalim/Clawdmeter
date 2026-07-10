@@ -6,13 +6,17 @@ enum screen_t {
     SCREEN_SPLASH,
     SCREEN_USAGE,
     SCREEN_MEDIA,       // landscape right  (quadrant 1): now playing
-    SCREEN_STATS,       // upside-down      (quadrant 2): cache ring + heatmap
+    SCREEN_STATS,       // cache ring + heatmap (compiled, no longer mapped)
     SCREEN_BURNDOWN,    // landscape left   (quadrant 3): Asana sprint board
+    SCREEN_PACE,        // upside-down      (quadrant 2): projection + heatmap
     SCREEN_COUNT,
 };
 
 void ui_init(void);
 void ui_update(const UsageData* data);
+// Consumption rate in %/hour for the Pace screen's projection; -1 while the
+// rate window is still warming up. Fed from main.cpp, which owns the sampler.
+void ui_set_usage_rate(float pct_per_hour);
 // Album cover for the media screen: w*h RGB565 (little-endian) pixels.
 // nullptr clears/hides the cover. The buffer must stay valid until replaced.
 void ui_set_album_art(const uint8_t* rgb565, int w, int h);

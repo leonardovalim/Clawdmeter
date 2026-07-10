@@ -107,13 +107,20 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
+// ---- 24-hour activity heatmap (shared by SCREEN_STATS and SCREEN_PACE) ----
+// One instance per screen: the bars are real LVGL objects parented to their own
+// container, so the two screens can't share a single set.
+struct Heatmap {
+    lv_obj_t* fill[24];
+    int       bar_max_h;
+};
+static Heatmap hm_stats = {};
+
 // ---- Stats screen (SCREEN_STATS) ----
 static lv_obj_t* stats_container    = nullptr;
 static lv_obj_t* arc_cache          = nullptr;
 static lv_obj_t* lbl_cache_pct      = nullptr;
 static lv_obj_t* lbl_cache_sub      = nullptr;
-static lv_obj_t* heatmap_fill[24]   = {};
-static int       hm_bar_max_h       = 0;
 
 // ---- Media screen (SCREEN_MEDIA) ----
 static lv_obj_t* media_container    = nullptr;
@@ -483,21 +490,57 @@ static void init_usage_screen(lv_obj_t* scr) {
     // above all content screens (except splash).
 }
 
-// ======== Stats screen ========
+// ======== 24-hour heatmap (shared) ========
 
-static void update_heatmap_bars(const UsageData* data) {
-    if (!heatmap_fill[0] || hm_bar_max_h == 0) return;
+// Build the panel + 24 stacked bars into `parent` at (L.margin, y) sized
+// (L.content_w, h). Geometry is derived from h so both screens can place it
+// wherever their layout wants.
+static void heatmap_build(Heatmap* hm, lv_obj_t* parent, int y, int h) {
+    lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, h);
+    lv_obj_set_style_pad_all(panel, 8, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    const int bar_w = (L.content_w - 16) / 24;
+    hm->bar_max_h = h - 16;
+
+    for (int i = 0; i < 24; i++) {
+        lv_obj_t* bg = lv_obj_create(panel);
+        lv_obj_set_size(bg, bar_w - 2, hm->bar_max_h);
+        lv_obj_set_pos(bg, i * bar_w, 0);
+        lv_obj_set_style_bg_color(bg, COL_BAR_BG, 0);
+        lv_obj_set_style_bg_opa(bg, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(bg, 0, 0);
+        lv_obj_set_style_radius(bg, 2, 0);
+        lv_obj_set_style_pad_all(bg, 0, 0);
+        lv_obj_clear_flag(bg, LV_OBJ_FLAG_SCROLLABLE);
+
+        hm->fill[i] = lv_obj_create(bg);
+        lv_obj_set_size(hm->fill[i], bar_w - 2, 0);
+        lv_obj_set_pos(hm->fill[i], 0, hm->bar_max_h);
+        lv_obj_set_style_bg_color(hm->fill[i], COL_DIM, 0);
+        lv_obj_set_style_bg_opa(hm->fill[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(hm->fill[i], 0, 0);
+        lv_obj_set_style_radius(hm->fill[i], 2, 0);
+        lv_obj_clear_flag(hm->fill[i], LV_OBJ_FLAG_SCROLLABLE);
+    }
+}
+
+// 0 → track color; 1-49 green; 50-79 amber; >= 80 red.
+static void heatmap_update(Heatmap* hm, const UsageData* data) {
+    if (!hm->fill[0] || hm->bar_max_h == 0) return;
     for (int i = 0; i < 24; i++) {
         int val      = data->hourly[i];
-        int fill_h   = (hm_bar_max_h * val) / 100;
-        lv_obj_set_height(heatmap_fill[i], fill_h);
-        lv_obj_set_y(heatmap_fill[i], hm_bar_max_h - fill_h);
+        int fill_h   = (hm->bar_max_h * val) / 100;
+        lv_obj_set_height(hm->fill[i], fill_h);
+        lv_obj_set_y(hm->fill[i], hm->bar_max_h - fill_h);
         lv_color_t col = (val == 0) ? COL_BAR_BG :
                          (val >= 80) ? COL_RED    :
                          (val >= 50) ? COL_AMBER  : COL_GREEN;
-        lv_obj_set_style_bg_color(heatmap_fill[i], col, 0);
+        lv_obj_set_style_bg_color(hm->fill[i], col, 0);
     }
 }
+
+// ======== Stats screen ========
 
 static void init_stats_screen(lv_obj_t* scr) {
     stats_container = lv_obj_create(scr);
@@ -546,34 +589,7 @@ static void init_stats_screen(lv_obj_t* scr) {
     lv_obj_align_to(lbl_cache_sub, arc_cache, LV_ALIGN_CENTER, 0, 28);
 
     // 24-hour activity heatmap
-    const int hm_y = 295, hm_h = 110;
-    lv_obj_t* hm_panel = make_panel(stats_container, L.margin, hm_y, L.content_w, hm_h);
-    lv_obj_set_style_pad_all(hm_panel, 8, 0);
-    lv_obj_clear_flag(hm_panel, LV_OBJ_FLAG_SCROLLABLE);
-
-    const int bar_w = (L.content_w - 16) / 24;
-    hm_bar_max_h = hm_h - 16;
-
-    for (int i = 0; i < 24; i++) {
-        lv_obj_t* bg = lv_obj_create(hm_panel);
-        lv_obj_set_size(bg, bar_w - 2, hm_bar_max_h);
-        lv_obj_set_pos(bg, i * bar_w, 0);
-        lv_obj_set_style_bg_color(bg, COL_BAR_BG, 0);
-        lv_obj_set_style_bg_opa(bg, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(bg, 0, 0);
-        lv_obj_set_style_radius(bg, 2, 0);
-        lv_obj_set_style_pad_all(bg, 0, 0);
-        lv_obj_clear_flag(bg, LV_OBJ_FLAG_SCROLLABLE);
-
-        heatmap_fill[i] = lv_obj_create(bg);
-        lv_obj_set_size(heatmap_fill[i], bar_w - 2, 0);
-        lv_obj_set_pos(heatmap_fill[i], 0, hm_bar_max_h);
-        lv_obj_set_style_bg_color(heatmap_fill[i], COL_DIM, 0);
-        lv_obj_set_style_bg_opa(heatmap_fill[i], LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(heatmap_fill[i], 0, 0);
-        lv_obj_set_style_radius(heatmap_fill[i], 2, 0);
-        lv_obj_clear_flag(heatmap_fill[i], LV_OBJ_FLAG_SCROLLABLE);
-    }
+    heatmap_build(&hm_stats, stats_container, 295, 110);
 }
 
 // ======== Media screen ========
@@ -1026,7 +1042,7 @@ void ui_update(const UsageData* data) {
             lv_label_set_text(lbl_cache_pct, "--");
         }
     }
-    update_heatmap_bars(data);
+    heatmap_update(&hm_stats, data);
 
     // ---- Media screen ----
     if (media_container) {

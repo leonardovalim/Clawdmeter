@@ -9,8 +9,24 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include <mbedtls/platform.h>
+#include <esp_heap_caps.h>
 #include "letsencrypt_ca.h"
 #include "sprint_net.h"
+
+// This build ships CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC, so mbedTLS allocates the
+// ~32KB of TLS handshake buffers from internal DRAM. At fetch time LVGL + NimBLE
+// + the WiFi stack leave under ~30KB contiguous internal, so those allocations
+// fail (MBEDTLS_ERR_SSL_ALLOC_FAILED) and the fetch never completes. Redirect
+// mbedTLS's allocator to PREFER PSRAM (8MB free), falling back to internal — the
+// same policy as CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC, but flipped on at runtime via
+// the MBEDTLS_PLATFORM_MEMORY hook (defined in ESP-IDF's mbedtls esp_config.h).
+static void* tls_calloc_psram(size_t n, size_t size) {
+    return heap_caps_calloc_prefer(n, size, 2,
+                                   MALLOC_CAP_SPIRAM   | MALLOC_CAP_8BIT,
+                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+static void tls_free_psram(void* p) { heap_caps_free(p); }
 
 static const char* SPRINT_URL = "https://asana-dash.vercel.app/api/device/sprint";
 static const uint32_t FETCH_INTERVAL_MS = 300000UL;   // 5 min between fetches
@@ -98,6 +114,14 @@ static bool parse_bd(const String& body) {
 
 static void fetch_now() {
     if (WiFi.status() != WL_CONNECTED || !s_tok[0]) return;
+
+    // Route mbedTLS's allocations to PSRAM (see tls_calloc_psram). Global +
+    // idempotent, so install once on the first fetch.
+    static bool tls_alloc_installed = false;
+    if (!tls_alloc_installed) {
+        mbedtls_platform_set_calloc_free(tls_calloc_psram, tls_free_psram);
+        tls_alloc_installed = true;
+    }
 
     // Heap check: TLS handshake precisa de ~40KB. Se sobrar menos, dá
     // "SSL - Memory allocation failed" e nunca termina. Log pra ter chão

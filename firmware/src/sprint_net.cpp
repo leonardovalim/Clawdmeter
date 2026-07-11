@@ -38,16 +38,30 @@ static UsageData s_bd{};           // only bd_* fields are populated
 static uint32_t s_last_ok = 0;
 static bool s_have = false;
 static uint32_t s_last_fetch = 0;
+static bool s_from_portal = false;   // creds vieram do portal local → autoritativas
 
 static void load_creds() {
     s_prefs.begin("clawdwifi", true);
     s_prefs.getString("ssid", s_ssid, sizeof(s_ssid));
     s_prefs.getString("pw",   s_pw,   sizeof(s_pw));
     s_prefs.getString("tok",  s_tok,  sizeof(s_tok));
+    s_from_portal = (s_prefs.getUChar("src", 0) == 1);
     s_prefs.end();
 }
 
 void sprint_net_provision(const char* ssid, const char* pw, const char* tok) {
+    // Portal local é autoritativo: se as creds atuais vieram do portal (ou do
+    // gesto de reset → reprovisionamento), ignora o push do daemon pra ele não
+    // sobrescrever o que o usuário setou na mão. Um reset (sprint_net_forget)
+    // limpa a flag e volta a aceitar o daemon.
+    if (s_from_portal) {
+        static bool logged = false;
+        if (!logged) {
+            Serial.println("sprint_net: creds do portal são autoritativas — ignorando push BLE");
+            logged = true;
+        }
+        return;
+    }
     // Daemon reescreve o blob a cada reconexão BLE (~60s). Se as credenciais
     // são as mesmas de sempre, derrubar WiFi.disconnect() + WiFi.begin() a
     // cada vez impede o fetch de terminar — thrash. Só re-associa se algum
@@ -191,6 +205,7 @@ void sprint_net_forget(void) {
     s_ssid[0] = s_pw[0] = s_tok[0] = '\0';
     s_have = false;
     s_last_ok = 0;
+    s_from_portal = false;   // volta a aceitar provisionamento por BLE (daemon)
     WiFi.disconnect(true);
     Serial.println("sprint_net: credenciais apagadas (forget)");
 }

@@ -72,6 +72,8 @@ firmware/src/
   ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
   splash.{h,cpp}            — 20×20 pixel-art engine. CELL = min(W,H)/20, centered.
   ble.{h,cpp}               — NimBLE peripheral: custom data service + HID keyboard
+  sprint_net.{h,cpp}        — WiFi Sprint fetch (S3-only, BOARD_HAS_WIFI). NVS creds, TLS→PSRAM, provision. Stubs on C6.
+  wifi_portal.{h,cpp}       — WiFi setup captive-portal (S3-only): SoftAP + form + QR. Stubs on C6.
   data.h                    — UsageData struct
   icons.h                   — icon arrays. Battery (5×) are RGB565A8 with alpha; rest are raw RGB565.
   logo.h                    — 80×80 RGB565 logo
@@ -145,6 +147,8 @@ The boot screen is `SCREEN_SPLASH` and only advances on a physical button press,
 9. **Per-board pre-init is `board_init()`.** Each board's `board_init.cpp` brings up `Wire` and any reset-gating IO expander BEFORE `display_hal_init()`. Skipping the IO expander release on AMOLED-1.8 leaves SH8601 + FT3168 in reset and they silently fail to probe.
 10. **No `#ifdef BOARD_*` in shared code.** The whole point of the refactor — if you're about to add one, you probably want a `BoardCaps` field or a per-board file instead. See `docs/porting/capability-flags.md`.
 11. **Reset chime is 3 pulses over 60s, not a single beep.** `chime.cpp`'s `chime_play_repeated()` (called from each sound-capable board's `sound_hal_play_reset()`) fires immediately then again at `CHIME_RESET_INTERVAL_MS` (30s) via `chime_tick()` in the main loop — constants live in `chime.h`. The `buzz` serial command triggers the same repeated sequence (not a single `chime_play()`), so it previews the real on-device experience. Only `waveshare_amoled_216` and `waveshare_amoled_18` wire a speaker (`BOARD_HAS_SOUND`); the C6 boards' `sound_hal_play_reset()` is a no-op stub.
+12. **Two different Sprint tokens — don't confuse them.** The daemon's own Asana poll (`_fetch_sprint`) uses `asana_token` against the Asana MCP URL. The *device*'s WiFi fetch hits `/api/device/sprint` on `asana-dash.vercel.app` and needs the **`device_token`** (the `DEVICE_TOKEN` env var in that Vercel project) — a *separate* secret. Sending `asana_token` to the device endpoint returns 401. Verify a token with `curl -H "Authorization: Bearer <tok>" https://asana-dash.vercel.app/api/device/sprint`.
+13. **WiFi provisioning: on-device portal wins over the daemon.** Creds reach NVS two ways — the daemon's BLE PROV push (from config `wifi_ssid/wifi_password/device_token`) or the on-screen captive portal (`wifi_portal.cpp`, triggered by the auto rule "no WiFi + no BLE ~30s" or the 2-side-button ~5s reset gesture). The portal writes an NVS `src=1` flag; `sprint_net_provision` then ignores the daemon's push so the local setup isn't clobbered. `sprint_net_forget()` (the reset gesture) clears it. The QR overlay only renders on the Sprint screen; it needs `-DLV_USE_QRCODE=1` (S3 envs only).
 
 ## Icons
 

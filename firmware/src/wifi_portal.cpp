@@ -125,6 +125,7 @@ static void handle_save(void) {
     if (ssid.length()) s_prefs.putString("ssid", ssid);
     if (pw.length())   s_prefs.putString("pw",   pw);
     if (tok.length())  s_prefs.putString("tok",  tok);
+    s_prefs.putUChar("src", 1);   // provisionado pelo portal → autoritativo sobre o daemon
     s_prefs.end();
 
     Serial.printf("wifi_portal: saved ssid='%s' (pw=%d tok=%d) — rebooting\n",

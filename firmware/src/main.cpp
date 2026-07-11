@@ -257,7 +257,7 @@ static void check_serial_cmd() {
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
             else if (strcmp(cmd_buf, "wifi") == 0)  sprint_net_debug_status();
-            else if (strcmp(cmd_buf, "portal") == 0) wifi_portal_start();
+            else if (strcmp(cmd_buf, "portal") == 0) wifi_portal_start(true);
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -351,6 +351,13 @@ static void imu_screen_tick(void) {
 //   6.0s (+4500)          → DISARMED (no clear; AXP powers off at 8s)
 #define PAIR_ARM_AFTER_LONG_MS    1500   // 3.0s total
 #define PAIR_DISARM_AFTER_LONG_MS 4500   // 6.0s total
+
+// WiFi-reset gesture: hold both side buttons this long → forget creds + portal.
+#define WIFI_RESET_HOLD_MS 5000
+#define WIFI_RESET_ARM_MS  1200   // só mostra a contagem depois disso (evita flash acidental)
+
+// Auto WiFi-setup: sem WiFi conectado E sem BLE por este tempo → sobe o portal.
+#define WIFI_AUTO_PORTAL_MS 30000
 enum pair_state_t { PAIR_IDLE, PAIR_PENDING, PAIR_ARMED };
 static pair_state_t pair_state        = PAIR_IDLE;
 static uint32_t     pair_long_seen_ms = 0;
@@ -415,6 +422,31 @@ void loop() {
     // press. Activity bookkeeping happens inside idle_consume_wake_press
     // so no separate idle_note_activity() call is needed here.
     {
+        // ---- Reset de WiFi: segurar os 2 botões laterais ~5s ----
+        // Gesto deliberado (o PWR-hold já é o reset de BLE). Enquanto ativo,
+        // suprime o Space/Shift+Tab dos botões individuais e mostra a contagem;
+        // ao completar, apaga as creds do NVS e sobe o portal de setup.
+        static uint32_t combo_since = 0;
+        bool combo = board_caps().button_count >= 2 &&
+                     input_hal_is_held(INPUT_BTN_PRIMARY) &&
+                     input_hal_is_held(INPUT_BTN_SECONDARY);
+        if (combo) {
+            if (combo_since == 0) { combo_since = millis(); ble_keyboard_release(); }
+            uint32_t held = millis() - combo_since;
+            if (held >= WIFI_RESET_ARM_MS) {
+                int rem = (int)((WIFI_RESET_HOLD_MS + 999 - held) / 1000);
+                ui_wifi_reset_countdown(rem > 0 ? rem : 0);
+            }
+            if (held >= WIFI_RESET_HOLD_MS) {
+                ui_wifi_reset_countdown(-1);
+                Serial.println("WiFi reset gesture: forget creds + portal");
+                sprint_net_forget();
+                wifi_portal_start(true);
+                combo_since = 0;
+            }
+        } else {
+        if (combo_since != 0) { combo_since = 0; ui_wifi_reset_countdown(-1); }
+
         static bool primary_was = false;
         static bool primary_wake_swallowed = false;
         bool primary_now = input_hal_is_held(INPUT_BTN_PRIMARY);
@@ -444,6 +476,7 @@ void loop() {
                 secondary_was = secondary_now;
             }
         }
+        }  // fim do else (combo inativo)
 
         if (power_hal_pwr_pressed()) {
             if (!idle_consume_wake_press()) {
@@ -461,6 +494,19 @@ void loop() {
     if (bs != last_ble_state) {
         last_ble_state = bs;
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
+    }
+
+    // Auto WiFi-setup: sem WiFi conectado E sem BLE por ~30s → sobe o portal
+    // sozinho (onboarding). Cai quando WiFi ou BLE aparece — mas só se o portal
+    // foi automático; o manual (gesto dos 2 botões) fica até o reboot pós-save.
+    static uint32_t both_down_since = 0;
+    bool data_link = sprint_net_wifi_up() || (ble_get_state() == BLE_STATE_CONNECTED);
+    if (data_link) {
+        both_down_since = 0;
+        if (wifi_portal_active() && !wifi_portal_is_manual()) wifi_portal_stop();
+    } else if (!wifi_portal_active()) {
+        if (both_down_since == 0) both_down_since = millis();
+        else if (millis() - both_down_since >= WIFI_AUTO_PORTAL_MS) wifi_portal_start(false);
     }
 
     // WiFi-setup QR overlay follows the SoftAP portal state (no-op without WiFi).

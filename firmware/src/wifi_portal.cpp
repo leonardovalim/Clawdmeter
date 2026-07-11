@@ -17,6 +17,7 @@ static DNSServer  s_dns;
 static WebServer  s_server(80);
 static Preferences s_prefs;
 static bool     s_active = false;
+static bool     s_manual = false;
 static bool     s_restart_pending = false;
 static uint32_t s_restart_at = 0;
 static IPAddress s_ap_ip;
@@ -140,8 +141,9 @@ static void handle_save(void) {
     s_restart_at = millis() + 1500;
 }
 
-void wifi_portal_start(void) {
+void wifi_portal_start(bool manual) {
     if (s_active) return;
+    s_manual = manual;
     WiFi.mode(WIFI_AP_STA);            // AP_STA so scan_networks() can see nearby APs
     WiFi.softAP(AP_NAME);              // open network — short-lived setup window
     delay(120);
@@ -184,14 +186,16 @@ void wifi_portal_tick(void) {
 }
 
 bool        wifi_portal_active(void)  { return s_active; }
+bool        wifi_portal_is_manual(void) { return s_manual; }
 const char* wifi_portal_ap_name(void) { return AP_NAME; }
 const char* wifi_portal_ap_ip(void)   { return s_ip_str; }
 
 #else   // no WiFi on this board — empty stubs so shared callers link
 #include "wifi_portal.h"
-void        wifi_portal_start(void)   {}
+void        wifi_portal_start(bool)   {}
 void        wifi_portal_stop(void)    {}
 bool        wifi_portal_active(void)  { return false; }
+bool        wifi_portal_is_manual(void) { return false; }
 void        wifi_portal_tick(void)    {}
 const char* wifi_portal_ap_name(void) { return ""; }
 const char* wifi_portal_ap_ip(void)   { return ""; }

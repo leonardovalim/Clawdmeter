@@ -210,6 +210,8 @@ static lv_chart_series_t* ser_bd_ideal  = nullptr;
 static lv_chart_series_t* ser_bd_actual = nullptr;
 static lv_obj_t* lbl_bd_legend      = nullptr;
 static lv_obj_t* bd_setup_group     = nullptr;  // WiFi-setup overlay (QR) sobre o Sprint
+static lv_obj_t* reset_overlay      = nullptr;  // contagem do reset de WiFi (2 botões)
+static lv_obj_t* reset_num          = nullptr;  // número grande da contagem
 
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
@@ -1276,6 +1278,38 @@ void ui_init(void) {
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
     lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
     lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+
+    // WiFi-reset countdown overlay. On lv_layer_top() so it floats above ANY
+    // screen (o gesto dos 2 botões vale em qualquer tela). Toggled by
+    // ui_wifi_reset_countdown().
+    reset_overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(reset_overlay, L.scr_w, L.scr_h);
+    lv_obj_center(reset_overlay);
+    lv_obj_set_style_bg_color(reset_overlay, COL_BG, 0);
+    lv_obj_set_style_bg_opa(reset_overlay, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(reset_overlay, 0, 0);
+    lv_obj_set_style_radius(reset_overlay, 0, 0);
+    lv_obj_clear_flag(reset_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* rt = lv_label_create(reset_overlay);
+    lv_label_set_text(rt, "Resetar WiFi");
+    lv_obj_set_style_text_font(rt, &font_styrene_28, 0);
+    lv_obj_set_style_text_color(rt, COL_TEXT, 0);
+    lv_obj_align(rt, LV_ALIGN_CENTER, 0, -70);
+
+    reset_num = lv_label_create(reset_overlay);
+    lv_label_set_text(reset_num, "5");
+    lv_obj_set_style_text_font(reset_num, &font_tiempos_56, 0);
+    lv_obj_set_style_text_color(reset_num, COL_ACCENT, 0);
+    lv_obj_align(reset_num, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t* rh = lv_label_create(reset_overlay);
+    lv_label_set_text(rh, "Solte para cancelar");
+    lv_obj_set_style_text_font(rh, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(rh, COL_DIM, 0);
+    lv_obj_align(rh, LV_ALIGN_CENTER, 0, 70);
+
+    lv_obj_add_flag(reset_overlay, LV_OBJ_FLAG_HIDDEN);
 }
 
 // Sprint/burndown screen render. Split out of ui_update because the Sprint data
@@ -1347,6 +1381,21 @@ static void render_burndown(const UsageData* data) {
         lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+// WiFi-reset countdown (gesto dos 2 botões). secs>=0 mostra o overlay com o
+// número; secs<0 esconde. No-op se o overlay não existe.
+void ui_wifi_reset_countdown(int secs) {
+    if (!reset_overlay) return;
+    if (secs < 0) {
+        lv_obj_add_flag(reset_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    char b[8];
+    snprintf(b, sizeof(b), "%d", secs);
+    lv_label_set_text(reset_num, b);
+    lv_obj_clear_flag(reset_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(reset_overlay);
 }
 
 // Toggle the WiFi-setup overlay (QR) on the Sprint screen. Driven by main.cpp

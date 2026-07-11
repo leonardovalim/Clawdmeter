@@ -20,6 +20,9 @@ void ui_set_usage_rate(float pct_per_hour);
 // Show/hide the WiFi-setup overlay (QR) on the Sprint screen. Driven from the
 // main loop off wifi_portal_active(). No-op on boards without WiFi.
 void ui_set_wifi_setup(bool active);
+// WiFi-reset countdown overlay (gesto dos 2 botões laterais). secs>=0 mostra o
+// número; secs<0 esconde.
+void ui_wifi_reset_countdown(int secs);
 // Album cover for the media screen: w*h RGB565 (little-endian) pixels.
 // nullptr clears/hides the cover. The buffer must stay valid until replaced.
 void ui_set_album_art(const uint8_t* rgb565, int w, int h);

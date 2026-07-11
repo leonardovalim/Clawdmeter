@@ -178,6 +178,23 @@ void sprint_net_tick(void) {
     }
 }
 
+bool sprint_net_wifi_up(void) {
+    return WiFi.status() == WL_CONNECTED;
+}
+
+void sprint_net_forget(void) {
+    // Reset de WiFi (gesto dos 2 botões): apaga as credenciais do NVS, zera o
+    // estado em RAM e derruba o STA. Depois disso o portal sobe pra reprovisionar.
+    s_prefs.begin("clawdwifi", false);
+    s_prefs.clear();
+    s_prefs.end();
+    s_ssid[0] = s_pw[0] = s_tok[0] = '\0';
+    s_have = false;
+    s_last_ok = 0;
+    WiFi.disconnect(true);
+    Serial.println("sprint_net: credenciais apagadas (forget)");
+}
+
 void sprint_net_debug_status(void) {
     uint32_t now = millis();
     Serial.printf("=== sprint_net status ===\n");
@@ -216,5 +233,7 @@ void sprint_net_init(void) {}
 void sprint_net_tick(void) {}
 void sprint_net_provision(const char*, const char*, const char*) {}
 bool sprint_net_get(UsageData*) { return false; }
+bool sprint_net_wifi_up(void) { return false; }
+void sprint_net_forget(void) {}
 void sprint_net_debug_status(void) { Serial.println("sprint_net: sem WiFi neste board"); }
 #endif

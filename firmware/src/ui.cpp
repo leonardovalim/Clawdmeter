@@ -1218,7 +1218,81 @@ void ui_init(void) {
     lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Sprint/burndown screen render. Split out of ui_update because the Sprint data
+// can arrive over WiFi with no daemon payload behind it (UsageData.valid=false),
+// and ui_update early-returns on !valid — which used to leave the Sprint screen
+// stuck on "No sprint data" whenever the daemon was offline. Called before that
+// gate so WiFi-only Sprint data still renders. See sprint_net_get / main.cpp arbiter.
+static void render_burndown(const UsageData* data) {
+    if (!burndown_container) return;
+    char buf[16];
+    if (data->has_burndown) {
+        // Celebrate tasks that crossed into Done since the last payload.
+        // -1 means "no baseline yet", so a fresh boot or a reconnect never
+        // fires. A sprint rollover re-baselines instead of celebrating the
+        // new sprint's inherited Done count.
+        static int  last_bd_done = -1;
+        static char last_bd_name[sizeof(data->bd_name)] = {0};
+        const bool same_sprint = strcmp(last_bd_name, data->bd_name) == 0;
+        if (same_sprint && last_bd_done >= 0 && data->bd_done > last_bd_done) {
+            confetti_burst();
+            sound_hal_play_celebrate();
+        }
+        last_bd_done = data->bd_done;
+        snprintf(last_bd_name, sizeof(last_bd_name), "%s", data->bd_name);
+
+        lv_obj_add_flag(lbl_bd_nothing, LV_OBJ_FLAG_HIDDEN);
+        snprintf(buf, sizeof(buf), "%d", data->bd_todo);
+        lv_label_set_text(lbl_bd_todo,  buf);
+        snprintf(buf, sizeof(buf), "%d", data->bd_doing);
+        lv_label_set_text(lbl_bd_doing, buf);
+        snprintf(buf, sizeof(buf), "%d", data->bd_done);
+        lv_label_set_text(lbl_bd_done,  buf);
+
+        if (data->bd_name[0]) {
+            lv_label_set_text(lbl_bd_sprint, data->bd_name);
+            lv_obj_clear_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(lbl_bd_source,
+                              data->bd_source_wifi ? "WiFi" : "BLE");
+            lv_obj_set_style_text_color(lbl_bd_source,
+                data->bd_source_wifi ? COL_GREEN : COL_DIM, 0);
+            lv_obj_clear_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        // Burndown chart: plot ideal + actual; future actual points are gaps.
+        if (data->bd_days > 0 && data->bd_max > 0 && chart_bd) {
+            lv_chart_set_point_count(chart_bd, data->bd_days);
+            lv_chart_set_range(chart_bd, LV_CHART_AXIS_PRIMARY_Y, 0, data->bd_max);
+            for (int i = 0; i < data->bd_days; i++) {
+                lv_chart_set_value_by_id(chart_bd, ser_bd_ideal, i,
+                                         data->bd_ideal[i]);
+                lv_chart_set_value_by_id(chart_bd, ser_bd_actual, i,
+                    (data->bd_actual[i] < 0) ? LV_CHART_POINT_NONE
+                                             : (int32_t)data->bd_actual[i]);
+            }
+            lv_chart_refresh(chart_bd);
+            lv_obj_clear_flag(chart_bd, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(chart_bd, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        lv_obj_clear_flag(lbl_bd_nothing, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(lbl_bd_todo,  "--");
+        lv_label_set_text(lbl_bd_doing, "--");
+        lv_label_set_text(lbl_bd_done,  "--");
+        lv_obj_add_flag(chart_bd,      LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 void ui_update(const UsageData* data) {
+    // Sprint/burndown first — it must render even without a daemon payload
+    // (WiFi-only Sprint data leaves valid=false and would trip the gate below).
+    render_burndown(data);
     if (!data->valid) return;
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
@@ -1359,71 +1433,6 @@ void ui_update(const UsageData* data) {
             lv_obj_add_flag(lbl_zone_next,       LV_OBJ_FLAG_HIDDEN);
             media_base_pos = -1;
             media_dur_s    = 0;
-        }
-    }
-
-    // ---- Burndown screen ----
-    if (burndown_container) {
-        if (data->has_burndown) {
-            // Celebrate tasks that crossed into Done since the last payload.
-            // -1 means "no baseline yet", so a fresh boot or a reconnect never
-            // fires. A sprint rollover re-baselines instead of celebrating the
-            // new sprint's inherited Done count.
-            static int  last_bd_done = -1;
-            static char last_bd_name[sizeof(data->bd_name)] = {0};
-            const bool same_sprint = strcmp(last_bd_name, data->bd_name) == 0;
-            if (same_sprint && last_bd_done >= 0 && data->bd_done > last_bd_done) {
-                confetti_burst();
-                sound_hal_play_celebrate();
-            }
-            last_bd_done = data->bd_done;
-            snprintf(last_bd_name, sizeof(last_bd_name), "%s", data->bd_name);
-
-            lv_obj_add_flag(lbl_bd_nothing, LV_OBJ_FLAG_HIDDEN);
-            snprintf(buf, sizeof(buf), "%d", data->bd_todo);
-            lv_label_set_text(lbl_bd_todo,  buf);
-            snprintf(buf, sizeof(buf), "%d", data->bd_doing);
-            lv_label_set_text(lbl_bd_doing, buf);
-            snprintf(buf, sizeof(buf), "%d", data->bd_done);
-            lv_label_set_text(lbl_bd_done,  buf);
-
-            if (data->bd_name[0]) {
-                lv_label_set_text(lbl_bd_sprint, data->bd_name);
-                lv_obj_clear_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
-                lv_label_set_text(lbl_bd_source,
-                                  data->bd_source_wifi ? "WiFi" : "BLE");
-                lv_obj_set_style_text_color(lbl_bd_source,
-                    data->bd_source_wifi ? COL_GREEN : COL_DIM, 0);
-                lv_obj_clear_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
-            }
-
-            // Burndown chart: plot ideal + actual; future actual points are gaps.
-            if (data->bd_days > 0 && data->bd_max > 0 && chart_bd) {
-                lv_chart_set_point_count(chart_bd, data->bd_days);
-                lv_chart_set_range(chart_bd, LV_CHART_AXIS_PRIMARY_Y, 0, data->bd_max);
-                for (int i = 0; i < data->bd_days; i++) {
-                    lv_chart_set_value_by_id(chart_bd, ser_bd_ideal, i,
-                                             data->bd_ideal[i]);
-                    lv_chart_set_value_by_id(chart_bd, ser_bd_actual, i,
-                        (data->bd_actual[i] < 0) ? LV_CHART_POINT_NONE
-                                                 : (int32_t)data->bd_actual[i]);
-                }
-                lv_chart_refresh(chart_bd);
-                lv_obj_clear_flag(chart_bd, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_add_flag(chart_bd, LV_OBJ_FLAG_HIDDEN);
-            }
-        } else {
-            lv_obj_clear_flag(lbl_bd_nothing, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(lbl_bd_todo,  "--");
-            lv_label_set_text(lbl_bd_doing, "--");
-            lv_label_set_text(lbl_bd_done,  "--");
-            lv_obj_add_flag(chart_bd,      LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
         }
     }
 }

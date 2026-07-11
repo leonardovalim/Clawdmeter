@@ -13,6 +13,7 @@
 #include "idle_cfg.h"
 #include "brightness.h"
 #include "sprint_net.h"
+#include "wifi_portal.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -256,6 +257,7 @@ static void check_serial_cmd() {
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
             else if (strcmp(cmd_buf, "wifi") == 0)  sprint_net_debug_status();
+            else if (strcmp(cmd_buf, "portal") == 0) wifi_portal_start();
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -389,7 +391,10 @@ void loop() {
     lv_timer_handler();
     ui_tick_anim();
     ble_tick();
-    sprint_net_tick();
+    wifi_portal_tick();
+    // No WiFi fetch while the setup AP is up — the portal owns the radio and we
+    // want the memory headroom free (no concurrent TLS handshake).
+    if (!wifi_portal_active()) sprint_net_tick();
     power_hal_tick();
     imu_hal_tick();
     imu_screen_tick();
@@ -456,6 +461,14 @@ void loop() {
     if (bs != last_ble_state) {
         last_ble_state = bs;
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
+    }
+
+    // WiFi-setup QR overlay follows the SoftAP portal state (no-op without WiFi).
+    static bool last_portal = false;
+    bool portal_now = wifi_portal_active();
+    if (portal_now != last_portal) {
+        last_portal = portal_now;
+        ui_set_wifi_setup(portal_now);
     }
 
     static int  last_pct      = -2;

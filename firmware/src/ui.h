@@ -17,6 +17,9 @@ void ui_update(const UsageData* data);
 // Consumption rate in %/hour for the Pace screen's projection; -1 while the
 // rate window is still warming up. Fed from main.cpp, which owns the sampler.
 void ui_set_usage_rate(float pct_per_hour);
+// Show/hide the WiFi-setup overlay (QR) on the Sprint screen. Driven from the
+// main loop off wifi_portal_active(). No-op on boards without WiFi.
+void ui_set_wifi_setup(bool active);
 // Album cover for the media screen: w*h RGB565 (little-endian) pixels.
 // nullptr clears/hides the cover. The buffer must stay valid until replaced.
 void ui_set_album_art(const uint8_t* rgb565, int w, int h);

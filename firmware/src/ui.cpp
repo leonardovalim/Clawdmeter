@@ -209,6 +209,7 @@ static lv_obj_t* chart_bd           = nullptr;  // burndown line chart
 static lv_chart_series_t* ser_bd_ideal  = nullptr;
 static lv_chart_series_t* ser_bd_actual = nullptr;
 static lv_obj_t* lbl_bd_legend      = nullptr;
+static lv_obj_t* bd_setup_group     = nullptr;  // WiFi-setup overlay (QR) sobre o Sprint
 
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
@@ -1085,6 +1086,65 @@ static void init_burndown_screen(lv_obj_t* scr) {
 
     lv_obj_add_flag(chart_bd,      LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
+
+#ifdef BOARD_HAS_WIFI
+    // WiFi-setup overlay (QR). Child of burndown_container so it only ever shows
+    // on the Sprint screen; toggled by ui_set_wifi_setup() when the SoftAP portal
+    // is up. Opaque full-screen cover, so it hides the chart/counts underneath.
+    bd_setup_group = lv_obj_create(burndown_container);
+    lv_obj_set_size(bd_setup_group, L.scr_w, L.scr_h);
+    lv_obj_set_pos(bd_setup_group, 0, 0);
+    lv_obj_set_style_bg_color(bd_setup_group, COL_BG, 0);
+    lv_obj_set_style_bg_opa(bd_setup_group, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bd_setup_group, 0, 0);
+    lv_obj_set_style_pad_all(bd_setup_group, 0, 0);
+    lv_obj_clear_flag(bd_setup_group, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* su_title = lv_label_create(bd_setup_group);
+    lv_label_set_text(su_title, "Configurar WiFi");
+    lv_obj_set_style_text_font(su_title, &font_tiempos_34, 0);
+    lv_obj_set_style_text_color(su_title, COL_TEXT, 0);
+    lv_obj_align(su_title, LV_ALIGN_TOP_MID, 0, 44);
+
+    lv_obj_t* su_hint = lv_label_create(bd_setup_group);
+    lv_label_set_text(su_hint, "Escaneie com o celular");
+    lv_obj_set_style_text_font(su_hint, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(su_hint, COL_DIM, 0);
+    lv_obj_align(su_hint, LV_ALIGN_TOP_MID, 0, 92);
+
+    // White quiet-zone panel so the QR scans reliably over the dark theme.
+    lv_obj_t* su_qpanel = lv_obj_create(bd_setup_group);
+    lv_obj_set_size(su_qpanel, 204, 204);
+    lv_obj_align(su_qpanel, LV_ALIGN_CENTER, 0, -6);
+    lv_obj_set_style_bg_color(su_qpanel, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(su_qpanel, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(su_qpanel, 12, 0);
+    lv_obj_set_style_border_width(su_qpanel, 0, 0);
+    lv_obj_set_style_pad_all(su_qpanel, 0, 0);
+    lv_obj_clear_flag(su_qpanel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* qr = lv_qrcode_create(su_qpanel);
+    lv_qrcode_set_size(qr, 184);
+    lv_qrcode_set_dark_color(qr, lv_color_black());
+    lv_qrcode_set_light_color(qr, lv_color_white());
+    static const char WIFI_QR[] = "WIFI:S:Clawdmeter-Setup;T:nopass;;";
+    lv_qrcode_update(qr, WIFI_QR, sizeof(WIFI_QR) - 1);
+    lv_obj_center(qr);
+
+    lv_obj_t* su_net = lv_label_create(bd_setup_group);
+    lv_label_set_text(su_net, "Rede: Clawdmeter-Setup");
+    lv_obj_set_style_text_font(su_net, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(su_net, COL_TEXT, 0);
+    lv_obj_align(su_net, LV_ALIGN_BOTTOM_MID, 0, -72);
+
+    lv_obj_t* su_url = lv_label_create(bd_setup_group);
+    lv_label_set_text(su_url, "depois abra  192.168.4.1");
+    lv_obj_set_style_text_font(su_url, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(su_url, COL_DIM, 0);
+    lv_obj_align(su_url, LV_ALIGN_BOTTOM_MID, 0, -46);
+
+    lv_obj_add_flag(bd_setup_group, LV_OBJ_FLAG_HIDDEN);
+#endif
 }
 
 // ======== Confetti (sprint celebration) ========
@@ -1286,6 +1346,18 @@ static void render_burndown(const UsageData* data) {
         lv_obj_add_flag(chart_bd,      LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_bd_sprint, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_bd_source, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Toggle the WiFi-setup overlay (QR) on the Sprint screen. Driven by main.cpp
+// from wifi_portal_active(). No-op on boards without the setup group (no WiFi).
+void ui_set_wifi_setup(bool active) {
+    if (!bd_setup_group) return;
+    if (active) {
+        lv_obj_clear_flag(bd_setup_group, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(bd_setup_group);  // cobre chart/counts/confetti
+    } else {
+        lv_obj_add_flag(bd_setup_group, LV_OBJ_FLAG_HIDDEN);
     }
 }
 

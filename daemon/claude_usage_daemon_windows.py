@@ -108,6 +108,11 @@ API_BODY = {
 
 HEATMAP_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "heatmap.json"
 
+# One JSON-lines record per poll — the raw dataset for the usage report
+# (tools/usage_report.py). Append-only; each line is self-describing so new
+# payload fields get captured automatically.
+USAGE_LOG_FILE = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Clawdmeter" / "usage_log.jsonl"
+
 
 def _build_file_logger() -> logging.Logger | None:
     """Create a rotating file logger for field diagnostics, or None.
@@ -587,6 +592,31 @@ async def _fetch_sprint(asana_token: str) -> dict | None:
     return None
 
 
+def _log_usage(payload: dict) -> None:
+    """Append one JSON-lines record per poll — the raw dataset for the usage
+    report. Best-effort: a logging failure must never disturb the poll loop.
+    Skips transient/bulky fields (media, chime/clock flags); keeps everything
+    that describes usage over time."""
+    try:
+        rec = {
+            "ts": round(time.time(), 1),
+            "iso": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        for k in ("s", "sr", "w", "wr", "st", "acct", "ch", "tp", "pd", "rd"):
+            if k in payload:
+                rec[k] = payload[k]
+        bd = payload.get("bd")
+        if isinstance(bd, dict):
+            for k in ("sn", "td", "dg", "dn", "tt"):
+                if k in bd:
+                    rec["bd_" + k] = bd[k]
+        USAGE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with USAGE_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log(f"usage log write failed: {e}")
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -683,6 +713,7 @@ async def poll_api(token: str) -> dict | None:
     if _asana_cache is not None:
         payload["bd"] = _asana_cache
 
+    _log_usage(payload)
     return payload
 
 

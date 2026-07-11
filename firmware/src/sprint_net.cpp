@@ -98,13 +98,31 @@ static bool parse_bd(const String& body) {
 
 static void fetch_now() {
     if (WiFi.status() != WL_CONNECTED || !s_tok[0]) return;
+
+    // Heap check: TLS handshake precisa de ~40KB. Se sobrar menos, dá
+    // "SSL - Memory allocation failed" e nunca termina. Log pra ter chão
+    // se voltar a acontecer.
+    size_t free_before = ESP.getFreeHeap();
+    size_t largest_free = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    Serial.printf("sprint_net: fetch pre-heap free=%u largest_int=%u\n",
+                  (unsigned)free_before, (unsigned)largest_free);
+
     WiFiClientSecure client;
-    client.setCACert(LETSENCRYPT_ROOT_CA);
+    // TLS insecure: skip cert verification, poupa ~10-15KB de heap (sem parse
+    // do CA nem cadeia de trust). Necessário porque no S3 com LVGL+NimBLE
+    // ativos o setCACert dava MBEDTLS_ERR_SSL_ALLOC_FAILED. Trade-off: um MITM
+    // na rede local pode interceptar o Bearer token; o endpoint é read-only
+    // (só devolve dados do sprint) então o pior caso é o atacante espelhar o
+    // sprint. Follow-up: voltar pra setCACert quando dimensionar mbedTLS
+    // pra alocar em PSRAM.
+    client.setInsecure();
     HTTPClient http;
     if (!http.begin(client, SPRINT_URL)) return;
     http.addHeader("Authorization", String("Bearer ") + s_tok);
     http.setTimeout(8000);
     int code = http.GET();
+    Serial.printf("sprint_net: fetch post-heap free=%u (code=%d)\n",
+                  (unsigned)ESP.getFreeHeap(), code);
     if (code == 200) {
         if (parse_bd(http.getString())) {
             s_have = true;

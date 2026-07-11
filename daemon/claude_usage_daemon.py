@@ -91,6 +91,11 @@ API_BODY = {
 # --- Extra screens (media / stats / burndown) ---
 HEATMAP_FILE = Path.home() / ".config" / "claude-usage-monitor" / "heatmap.json"
 
+# One JSON-lines record per poll — the raw dataset for the usage report
+# (tools/usage_report.py). Append-only; each line is self-describing so new
+# payload fields get captured automatically.
+USAGE_LOG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "usage_log.jsonl"
+
 ASANA_MCP_URL   = "https://asana-dash.vercel.app/api/mcp"
 ASANA_POLL_SECS = 300           # poll sprint data every 5 min (changes slowly)
 _asana_cache:     dict | None = None
@@ -847,6 +852,31 @@ async def _fetch_sprint(asana_token: str) -> dict | None:
     return None
 
 
+def _log_usage(payload: dict) -> None:
+    """Append one JSON-lines record per poll — the raw dataset for the usage
+    report. Best-effort: a logging failure must never disturb the poll loop.
+    Skips transient/bulky fields (media, chime/clock flags); keeps everything
+    that describes usage over time. Mirrors the Windows daemon."""
+    try:
+        rec = {
+            "ts": round(time.time(), 1),
+            "iso": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        for k in ("s", "sr", "w", "wr", "st", "acct", "ch", "tp", "pd", "rd"):
+            if k in payload:
+                rec[k] = payload[k]
+        bd = payload.get("bd")
+        if isinstance(bd, dict):
+            for k in ("sn", "td", "dg", "dn", "tt"):
+                if k in bd:
+                    rec["bd_" + k] = bd[k]
+        USAGE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with USAGE_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log(f"usage log write failed: {e}")
+
+
 async def _enrich_extra_screens(payload: dict) -> None:
     """Add the media/heatmap/burndown fields to the active plan's payload.
 
@@ -872,6 +902,8 @@ async def _enrich_extra_screens(payload: dict) -> None:
         _asana_last_poll = now_ts
     if _asana_cache is not None:
         payload["bd"] = _asana_cache
+
+    _log_usage(payload)   # payload completo (s/w/ch + hm/mi/bd) → log do relatório
 
 
 async def poll_api(token: str) -> dict | None:

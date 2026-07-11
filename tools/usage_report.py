@@ -30,10 +30,12 @@ TEXT = "#ece7e1"
 
 
 def default_log_path() -> Path:
+    # Windows daemon → %LOCALAPPDATA%\Clawdmeter; macOS/Linux daemon →
+    # ~/.config/claude-usage-monitor (mesma pasta do config/heatmap de cada um).
     base = os.environ.get("LOCALAPPDATA")
-    if base:
+    if base and os.name == "nt":
         return Path(base) / "Clawdmeter" / "usage_log.jsonl"
-    return Path.home() / "Library" / "Application Support" / "Clawdmeter" / "usage_log.jsonl"
+    return Path.home() / ".config" / "claude-usage-monitor" / "usage_log.jsonl"
 
 
 def load_records(path: Path) -> list[dict]:

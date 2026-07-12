@@ -49,8 +49,8 @@ static void scan_networks(void) {
     s_scan_count = 0;
     int n = WiFi.scanNetworks();
     // Mesh APs broadcast the same SSID several times — a raw list shows
-    // "Lilo_Rick_Morty" ×3 interleaved with "..._IoT" ×3, and the user taps the
-    // wrong near-identical row. Collapse to one <option> per unique SSID.
+    // "MyNet" ×3 interleaved with "MyNet_IoT" ×3, and the user taps the wrong
+    // near-identical row. Collapse to one <option> per unique SSID.
     for (int i = 0; i < n; i++) {
         String ss = WiFi.SSID(i);
         if (ss.length() == 0) continue;

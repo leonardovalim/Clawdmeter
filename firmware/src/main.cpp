@@ -404,7 +404,9 @@ void loop() {
     if (!wifi_portal_active()) sprint_net_tick();
     power_hal_tick();
     imu_hal_tick();
-    imu_screen_tick();
+    // Enquanto o portal de setup está no ar, congela a troca de tela por
+    // orientação — senão o QR (que só vive na tela Sprint) sairia de vista.
+    if (!wifi_portal_active()) imu_screen_tick();
     sound_hal_tick();
     splash_tick();
     // Rotation transition (blank + ramp) would fight the idle fade — skip
@@ -515,6 +517,9 @@ void loop() {
     if (portal_now != last_portal) {
         last_portal = portal_now;
         ui_set_wifi_setup(portal_now);
+        // Ao subir o portal, pula pra tela Sprint pra o QR já ficar visível
+        // (com o imu_screen_tick congelado acima, ele fica lá até o portal cair).
+        if (portal_now) ui_show_screen(SCREEN_BURNDOWN);
     }
 
     static int  last_pct      = -2;

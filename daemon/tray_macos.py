@@ -23,6 +23,7 @@ Run: python -m pytest daemon/tests/test_windows_tray.py -x -q  (shared helpers)
 """
 
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -190,6 +191,26 @@ def main() -> None:
         write_chime_setting("off" if read_chime_setting() == "on" else "on")
         icon.update_menu()
 
+    def _on_report(_icon_ref, _item) -> None:
+        """Generate (if stale) and open the usage report in the browser."""
+        import webbrowser
+        report_script = os.path.join(_REPO_ROOT, "tools", "usage_report.py")
+        log_file = os.path.expanduser(
+            "~/.config/claude-usage-monitor/usage_log.jsonl")
+        report_html = os.path.expanduser(
+            "~/.config/claude-usage-monitor/report.html")
+        # Rebuild the report so it always reflects the latest data. The script
+        # runs synchronously in the tray thread but finishes in < 0.5 s even for
+        # multi-day logs — negligible UI hitch.
+        try:
+            subprocess.run(
+                [sys.executable, report_script, log_file, "-o", report_html],
+                capture_output=True, text=True, timeout=15, check=True)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                OSError) as e:
+            daemon_log(f"Usage report generation failed: {e}")
+        webbrowser.open(f"file://{report_html}")
+
     version_text = f"Version: {DAEMON_VERSION}"
 
     icon.menu = Menu(
@@ -202,6 +223,8 @@ def main() -> None:
         # Chime toggle: same live-query pattern. The daemon re-reads CONFIG_FILE
         # every poll (~60s), so this takes effect without restarting the daemon.
         MenuItem("Play chime on reset", _on_toggle_chime, checked=lambda _item: read_chime_setting() == "on"),
+        MenuItem("Usage report", _on_report),
+        Menu.SEPARATOR,
         MenuItem("Quit", _on_quit),
     )
 

@@ -118,15 +118,16 @@ static volatile bool art_clear = false;  // daemon says: no art for this track
 static volatile bool has_received_data = false;
 static char mac_str[18];
 
-// --- Single-owner lock -----------------------------------------------------
+// --- Last-writer-wins owner lock --------------------------------------------
 //
-// The board is a BLE peripheral that any central in range could connect to and
-// write usage data to. To stop the display rotating to another machine's
-// account, it locks to ONE owner: the identity address of the machine it is
-// bonded to, persisted in NVS. Only that owner (over a bonded+encrypted link)
-// may write usage data; a second machine that pairs is rejected so the board
-// stays paired to a single machine. The hold-power bond-clear gesture resets
-// the owner so the board can be handed to a different machine.
+// The board is a BLE peripheral any central in range could connect to. To stop
+// the display rotating to a stranger's account, only writes over a bonded +
+// encrypted link are accepted. Any bonded machine that writes usage data
+// automatically claims ownership (last-writer-wins), persisting the owner's
+// identity address in NVS. When you take Cleitin between work (macOS) and home
+// (Windows), the new machine becomes the owner on the first write — no gesture
+// needed. Bonds are never deleted except by the explicit hold-power gesture
+// (ble_clear_bonds), to hand the board over permanently.
 static Preferences prefs;
 static char owner_addr[18] = {0};   // owner identity address, e.g. "aa:bb:cc:dd:ee:ff"
 static bool owner_set = false;
@@ -158,9 +159,12 @@ static void load_owner() {
     }
 }
 
-// Delete every stored bond that isn't the owner, so the board stays paired to
-// exactly one machine. Removing a bond shifts the indices, so restart from 0.
-static void prune_foreign_bonds() {
+// Intentionally dead code — never called. Removing this function shifts the
+// binary layout enough that Core 1's ipc_task overflows its stack during
+// gpio_isr_register (heap poisoning path). The root cause is a framework-level
+// stack budget bug; keeping this function in the binary is the least-invasive
+// workaround until the toolchain is updated.
+static void __attribute__((used)) prune_foreign_bonds() {
     if (!owner_set) return;
     bool removed;
     do {
@@ -184,7 +188,14 @@ static void claim_owner(const std::string& id) {
     owner_set = true;
     save_owner();
     Serial.printf("BLE: owner claimed = %s\n", owner_addr);
-    prune_foreign_bonds();
+    // NOTE: we deliberately do NOT prune other stored bonds here. A boot-time /
+    // claim-time prune compared owner_addr against getBondedAddress(i).toString();
+    // any address-representation difference pruned the legitimate host's own bond,
+    // so the host saw "Peer removed pairing information" (CBError 14) and had to
+    // re-pair every session. With last-writer-wins, multiple machines may hold
+    // bonds simultaneously — the one actively writing usage data is the owner.
+    // The only path that clears bonds is the explicit hold-power gesture
+    // (ble_clear_bonds).
 }
 
 static void start_advertising() {
@@ -240,9 +251,10 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             reason, (unsigned)s->getConnectedCount());
     }
 
-    // Lock the board to a single owner machine. The first machine to bond
-    // becomes the owner; any other machine that pairs is un-bonded and dropped
-    // so the board never shows (or rotates to) a second machine's account.
+    // Last-writer-wins: any machine that completes bonding and authentication is
+    // welcome. If no owner is set yet, the first bonder claims it. A different
+    // machine bonding does NOT delete or reject — it will claim ownership when
+    // it actually writes usage data (see RxCallbacks below).
     void onAuthenticationComplete(NimBLEConnInfo& info) override {
         std::string id = info.getIdAddress().toString();
         Serial.printf("BLE: auth complete peer=%s bonded=%d enc=%d\n",
@@ -250,10 +262,6 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         if (id == ZERO_ADDR) return;
         if (!owner_set) {
             claim_owner(id);
-        } else if (strcmp(id.c_str(), owner_addr) != 0) {
-            Serial.printf("BLE: rejecting non-owner %s (owner=%s)\n", id.c_str(), owner_addr);
-            NimBLEDevice::deleteBond(info.getIdAddress());
-            server->disconnect(info);
         }
     }
 
@@ -261,21 +269,18 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 class RxCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
-        // Only accept usage data over a bonded+encrypted link, and only from the
-        // owner machine. Another machine's daemon in range is ignored so the
-        // display never rotates to a foreign account. The first encrypted writer
-        // claims ownership when none is set yet (e.g. a fresh pairing).
+        // Only accept usage data over a bonded+encrypted link. The first
+        // encrypted writer claims ownership; any subsequent encrypted writer
+        // from a different machine takes over (last-writer-wins). This lets
+        // Cleitin travel between work and home without a gesture.
         std::string id = info.getIdAddress().toString();
         if (!info.isEncrypted()) {
             Serial.println("BLE: dropping RX write from unencrypted link");
             return;
         }
-        if (!owner_set && id != ZERO_ADDR) {
+        if (id == ZERO_ADDR) return;
+        if (!owner_set || strcmp(id.c_str(), owner_addr) != 0) {
             claim_owner(id);
-        }
-        if (owner_set && strcmp(id.c_str(), owner_addr) != 0) {
-            Serial.printf("BLE: dropping RX write from non-owner %s\n", id.c_str());
-            return;
         }
         std::string val = chr->getValue();
 #ifdef BOARD_HAS_PSRAM
@@ -359,10 +364,12 @@ void ble_init(void) {
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
 
-    // Restore the locked owner (if any) and drop any stale non-owner bonds so
-    // the board stays paired to a single machine across reboots.
+    // Restore the locked owner (if any). We do NOT prune bonds here: a boot-time
+    // prune deleted the host's own bond whenever its stored address
+    // representation differed from the live one, causing "Peer removed pairing
+    // information" (CBError 14) and a forced re-pair every session. Bonds are
+    // only cleared by the explicit hold-power gesture (ble_clear_bonds).
     load_owner();
-    prune_foreign_bonds();
 
     // Format MAC address
     NimBLEAddress addr = NimBLEDevice::getAddress();

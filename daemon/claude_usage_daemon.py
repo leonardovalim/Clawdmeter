@@ -322,49 +322,27 @@ async def retrieve_connected_macos(skip_addr: str | None = None):
         if _ok(p) and p.name() == DEVICE_NAME:
             return _wrap(p)
 
-    return None
-
-
-_pinned_peripherals = []  # retain CBPeripheral objects so a pending connect isn't GC'd
-
-
-async def request_reconnect_macos(skip_addr: str | None = None) -> bool:
-    """Proactively ask macOS to (re)connect to the cached peripheral.
-
-    retrieveConnectedPeripheralsWithServices_ is passive — it only returns a
-    peripheral the OS ALREADY holds, so otherwise the daemon waits for the user
-    to press a button / click Connect every session. Here we look the peripheral
-    up by its stored CoreBluetooth UUID and call connectPeripheral, which tells
-    macOS to establish AND maintain the link (auto-reconnect for the bonded
-    device). Fire-and-forget: the next discover cycle picks it up via
-    retrieveConnected. No-op (falls back to passive waiting) if there is no
-    cached UUID yet or Bluetooth is unavailable.
-    """
+    # 3. Not currently held by the OS — but if we cached this device's UUID on a
+    #    prior connect, retrieve the bonded peripheral by identifier and hand it
+    #    to BleakClient, which connects it directly over CoreBluetooth (no scan,
+    #    no advertising needed). This is what lets the daemon reconnect on its
+    #    own each session instead of waiting for a button press / manual Connect.
     addr = load_cached_address()
-    if not addr or (skip_addr and addr == skip_addr):
-        return False
-    try:
+    if addr and not (skip_addr and addr == skip_addr):
         from Foundation import NSUUID
 
-        manager = await _get_cb_manager()
-    except Exception as e:
-        log(f"Reconnect request unavailable: {e}")
-        return False
-    uuid = NSUUID.alloc().initWithUUIDString_(addr)
-    if uuid is None:
-        return False
-    try:
-        peripherals = manager.central_manager.retrievePeripheralsWithIdentifiers_([uuid])
-    except Exception as e:
-        log(f"retrievePeripheralsWithIdentifiers failed: {e}")
-        return False
-    for p in peripherals or []:
-        _pinned_peripherals.clear()
-        _pinned_peripherals.append(p)  # retain across the async gap
-        manager.central_manager.connectPeripheral_options_(p, None)
-        log(f"Requested OS reconnect to cached peripheral [{addr}]")
-        return True
-    return False
+        uuid = NSUUID.alloc().initWithUUIDString_(addr)
+        if uuid is not None:
+            try:
+                known = list(cm.retrievePeripheralsWithIdentifiers_([uuid]) or [])
+            except Exception as e:
+                log(f"retrievePeripheralsWithIdentifiers failed: {e}")
+                known = []
+            if known:
+                log(f"Bonded peripheral known by UUID [{addr}]; connecting directly")
+                return _wrap(known[0])
+
+    return None
 
 
 async def discover_target(skip_addr: str | None = None):
@@ -382,9 +360,8 @@ async def discover_target(skip_addr: str | None = None):
     if sys.platform == "darwin":
         dev = await retrieve_connected_macos(skip_addr=skip_addr)
         if dev is None:
-            if not await request_reconnect_macos(skip_addr=skip_addr):
-                log("Device not held by OS; waiting (no cached peripheral yet — "
-                    "press a button once to seed it)")
+            log("Device not held and no bonded UUID cached; waiting "
+                "(connect once to seed the cache)")
         return dev
 
     address = load_cached_address()
@@ -1205,12 +1182,18 @@ class Session:
 def _is_encryption_error(exc: BaseException) -> bool:
     """True if a connect error is a macOS bonding/encryption mismatch.
 
-    macOS reports a stale bond as CBErrorDomain Code=15 ("Failed to encrypt
-    the connection..."). Match on the message text so we don't depend on how
+    macOS reports a stale or missing bond as either:
+    - CBErrorDomain Code=14 "Peer removed pairing information" (ESP32 lost its
+      bond keys — e.g. after a firmware reflash or a bond-clear gesture).
+    - CBErrorDomain Code=15 "Failed to encrypt the connection..." (macOS holds
+      stale keys that the ESP32 no longer accepts).
+
+    Both mean the daemon must unpair the macOS side so the next connect
+    re-bonds cleanly. Match on the message text so we don't depend on how
     bleak wraps the underlying CoreBluetooth error.
     """
     s = str(exc).lower()
-    return "code=15" in s or "encrypt" in s
+    return "code=14" in s or "code=15" in s or "encrypt" in s
 
 
 # blueutil talks to Bluetooth via IOBluetooth, which on recent macOS needs its
@@ -1220,15 +1203,32 @@ def _is_encryption_error(exc: BaseException) -> bool:
 BLUEUTIL_TIMEOUT = 8
 
 
+BLUEUTIL_PATHS = [
+    "/opt/homebrew/bin/blueutil",   # Apple Silicon Homebrew
+    "/usr/local/bin/blueutil",      # Intel Homebrew / manual install
+    "blueutil",                     # PATH lookup
+]
+
+def _find_blueutil() -> str | None:
+    """Return the first working blueutil binary path, or None."""
+    for p in BLUEUTIL_PATHS:
+        if shutil.which(p):
+            return p
+    return None
+
 def _blueutil(*args: str) -> str | None:
     """Run `blueutil <args>`, returning stdout, or None on failure/timeout.
 
     A timeout almost always means blueutil lacks Bluetooth permission (it
     blocks rather than failing), so we surface that cause explicitly.
     """
+    exe = _find_blueutil()
+    if exe is None:
+        log("blueutil not found; install with: brew install blueutil")
+        return None
     try:
         return subprocess.run(
-            ["blueutil", *args],
+            [exe, *args],
             capture_output=True, text=True,
             timeout=BLUEUTIL_TIMEOUT, check=True,
         ).stdout
@@ -1257,7 +1257,7 @@ def unpair_macos() -> bool:
     True if a bond was removed. Mirrors the Linux daemon's `bluetoothctl
     remove` self-heal.
     """
-    if not shutil.which("blueutil"):
+    if not _find_blueutil():
         log("Stale bond detected but `blueutil` is not installed; cannot "
             "auto-recover. Run `brew install blueutil`, or forget "
             f"'{DEVICE_NAME}' in System Settings > Bluetooth and reconnect.")
@@ -1322,7 +1322,12 @@ async def connect_and_run(target, stop_event: asyncio.Event, tray_state=None) ->
         log(f"Connection failed: {e}")
         if sys.platform == "darwin" and _is_encryption_error(e):
             log("Encryption failed — likely a stale macOS bond; self-healing")
-            unpair_macos()
+            if unpair_macos():
+                # The bond was removed, so the cached CoreBluetooth UUID
+                # now points at a peripheral whose keys no longer match.
+                # Drop the cache so the next cycle discovers the device
+                # fresh and establishes a new bond.
+                SAVED_ADDR_FILE.unlink(missing_ok=True)
         return False
 
     if not client.is_connected:

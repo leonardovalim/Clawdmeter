@@ -1,5 +1,27 @@
 # Clawdmeter
 
+> **🍴 This is an enhanced fork of [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter).**
+> Full credit for the original device, firmware HAL, and design goes to [@HermannBjorgvin](https://github.com/HermannBjorgvin). This fork keeps everything from upstream and **adds** the extra screens and a fully on-device WiFi setup shown below. The original project README continues after the divider.
+
+## ✨ What this fork adds
+
+A few extra screens and a no-PC WiFi setup, layered on top of the original usage meter:
+
+|          Sprint burndown over WiFi          |         On-device WiFi setup (QR)         |            Pace / rhythm screen            |
+| :-----------------------------------------: | :---------------------------------------: | :----------------------------------------: |
+| ![Sprint over WiFi](screenshots/sprint_now.png) | ![WiFi setup via QR](screenshots/wifi_setup.png) | ![Pace screen](screenshots/ritmo_v2.png) |
+| Live To&nbsp;Do / Doing / Done + burndown chart, fetched **over WiFi** straight from a web dashboard — with a green **WiFi** source badge | Hold both side buttons to raise a captive-portal AP: scan the QR, type your WiFi from your phone. No re-flashing to change networks | Projects when you'll hit the 5-hour reset from your current burn rate, with an hourly heatmap |
+
+**Also in this fork:**
+
+- **📶 WiFi Sprint sync** — the device fetches sprint/burndown data over WiFi on its own (TLS on the ESP32-S3), independent of the host daemon, and shows an on-screen source badge (WiFi vs BLE).
+- **🔧 On-device WiFi provisioning** — captive-portal setup (SoftAP + QR + web form), auto-triggered when there's no WiFi *and* no BLE, plus a two-button "forget WiFi" reset gesture with an on-screen countdown.
+- **🎵 Now Playing / media screen** — shows the current track and sends media keys (play / pause / next / prev) over BLE HID, so it doubles as a Spotify remote.
+- **⏱️ Pace screen** — reset-countdown gauge + a projection of when you'll hit the 5-hour limit at your current rate.
+- **📊 Usage logging + HTML report** — an opt-in daemon log of every poll, plus [`tools/usage_report.py`](tools/usage_report.py), a zero-dependency script that turns it into a self-contained HTML report (session/weekly trends + a day×hour heatmap of when you use it most).
+
+---
+
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
 
 It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art Clawd animations that get

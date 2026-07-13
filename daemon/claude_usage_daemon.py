@@ -224,6 +224,23 @@ def load_cached_address() -> str | None:
     return None
 
 
+def save_cached_address(addr: str) -> None:
+    """Persist the resolved peripheral address/UUID for proactive reconnect.
+
+    On macOS this is the CoreBluetooth UUID, which lets a later run ask the OS
+    to reconnect the bonded device by identifier (see request_reconnect_macos)
+    instead of waiting for the user to nudge it.
+    """
+    try:
+        if load_cached_address() == addr:
+            return
+        SAVED_ADDR_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SAVED_ADDR_FILE.write_text(addr + "\n")
+        log(f"Cached peripheral address {addr}")
+    except OSError as e:
+        log(f"Could not cache address: {e}")
+
+
 # --- macOS: recover a device the OS already holds as an HID keyboard --------
 #
 # The firmware advertises as a BLE HID keyboard so its buttons type into the
@@ -308,6 +325,48 @@ async def retrieve_connected_macos(skip_addr: str | None = None):
     return None
 
 
+_pinned_peripherals = []  # retain CBPeripheral objects so a pending connect isn't GC'd
+
+
+async def request_reconnect_macos(skip_addr: str | None = None) -> bool:
+    """Proactively ask macOS to (re)connect to the cached peripheral.
+
+    retrieveConnectedPeripheralsWithServices_ is passive — it only returns a
+    peripheral the OS ALREADY holds, so otherwise the daemon waits for the user
+    to press a button / click Connect every session. Here we look the peripheral
+    up by its stored CoreBluetooth UUID and call connectPeripheral, which tells
+    macOS to establish AND maintain the link (auto-reconnect for the bonded
+    device). Fire-and-forget: the next discover cycle picks it up via
+    retrieveConnected. No-op (falls back to passive waiting) if there is no
+    cached UUID yet or Bluetooth is unavailable.
+    """
+    addr = load_cached_address()
+    if not addr or (skip_addr and addr == skip_addr):
+        return False
+    try:
+        from Foundation import NSUUID
+
+        manager = await _get_cb_manager()
+    except Exception as e:
+        log(f"Reconnect request unavailable: {e}")
+        return False
+    uuid = NSUUID.alloc().initWithUUIDString_(addr)
+    if uuid is None:
+        return False
+    try:
+        peripherals = manager.central_manager.retrievePeripheralsWithIdentifiers_([uuid])
+    except Exception as e:
+        log(f"retrievePeripheralsWithIdentifiers failed: {e}")
+        return False
+    for p in peripherals or []:
+        _pinned_peripherals.clear()
+        _pinned_peripherals.append(p)  # retain across the async gap
+        manager.central_manager.connectPeripheral_options_(p, None)
+        log(f"Requested OS reconnect to cached peripheral [{addr}]")
+        return True
+    return False
+
+
 async def discover_target(skip_addr: str | None = None):
     """Return a connectable target, or None.
 
@@ -323,7 +382,9 @@ async def discover_target(skip_addr: str | None = None):
     if sys.platform == "darwin":
         dev = await retrieve_connected_macos(skip_addr=skip_addr)
         if dev is None:
-            log("Device not held by OS; waiting (not scanning by name)")
+            if not await request_reconnect_macos(skip_addr=skip_addr):
+                log("Device not held by OS; waiting (no cached peripheral yet — "
+                    "press a button once to seed it)")
         return dev
 
     address = load_cached_address()
@@ -1269,6 +1330,10 @@ async def connect_and_run(target, stop_event: asyncio.Event, tray_state=None) ->
         return False
 
     log("Connected")
+    # Cache the resolved address/UUID so a later run can ask the OS to
+    # reconnect this bonded device by identifier instead of waiting passively.
+    if not isinstance(target, str) and getattr(target, "address", None):
+        save_cached_address(target.address)
     session = Session(client)
     await session.setup_refresh_subscription()
 

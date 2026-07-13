@@ -16,7 +16,11 @@ A few extra screens and a no-PC WiFi setup, layered on top of the original usage
 
 - **📶 WiFi Sprint sync** — the device fetches sprint/burndown data over WiFi on its own (TLS on the ESP32-S3), independent of the host daemon, and shows an on-screen source badge (WiFi vs BLE).
 - **🔧 On-device WiFi provisioning** — captive-portal setup (SoftAP + QR + web form), auto-triggered when there's no WiFi *and* no BLE, plus a two-button "forget WiFi" reset gesture with an on-screen countdown.
-- **🎵 Now Playing / media screen** — shows the current track and sends media keys (play / pause / next / prev) over BLE HID, so it doubles as a Spotify remote.
+- **🎵 Now Playing / media screen** — shows the current track (with album art) and sends media keys over BLE HID, so it doubles as a Spotify remote — tap to play/pause, swipe for next/previous:
+
+<p align="center">
+  <img src="screenshots/media_now.png" alt="Now Playing screen — Jimi Hendrix, Foxey Lady, with album art, transport controls and progress bar" width="400">
+</p>
 - **⏱️ Pace screen** — reset-countdown gauge + a projection of when you'll hit the 5-hour limit at your current rate.
 - **📊 Usage logging + HTML report** — an opt-in daemon log of every poll, plus [`tools/usage_report.py`](tools/usage_report.py), a zero-dependency script that turns it into a self-contained HTML report (session/weekly trends + a day×hour heatmap of when you use it most):
 

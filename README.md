@@ -18,7 +18,11 @@ A few extra screens and a no-PC WiFi setup, layered on top of the original usage
 - **🔧 On-device WiFi provisioning** — captive-portal setup (SoftAP + QR + web form), auto-triggered when there's no WiFi *and* no BLE, plus a two-button "forget WiFi" reset gesture with an on-screen countdown.
 - **🎵 Now Playing / media screen** — shows the current track and sends media keys (play / pause / next / prev) over BLE HID, so it doubles as a Spotify remote.
 - **⏱️ Pace screen** — reset-countdown gauge + a projection of when you'll hit the 5-hour limit at your current rate.
-- **📊 Usage logging + HTML report** — an opt-in daemon log of every poll, plus [`tools/usage_report.py`](tools/usage_report.py), a zero-dependency script that turns it into a self-contained HTML report (session/weekly trends + a day×hour heatmap of when you use it most).
+- **📊 Usage logging + HTML report** — an opt-in daemon log of every poll, plus [`tools/usage_report.py`](tools/usage_report.py), a zero-dependency script that turns it into a self-contained HTML report (session/weekly trends + a day×hour heatmap of when you use it most):
+
+<p align="center">
+  <img src="screenshots/usage_report.png" alt="Usage report — real data: session sawtooth with 5h resets, weekly climb, day×hour heatmap, sprint summary" width="720">
+</p>
 
 ---
 

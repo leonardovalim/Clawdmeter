@@ -524,12 +524,26 @@ void loop() {
 
     static int  last_pct      = -2;
     static bool last_charging = false;
+    static screen_t last_telem_screen = SCREEN_COUNT;
+    static uint32_t last_telem_ms = 0;
     int  pct      = power_hal_battery_pct();
     bool charging = power_hal_is_charging();
-    if (pct != last_pct || charging != last_charging) {
+    bool bat_changed = (pct != last_pct || charging != last_charging);
+    if (bat_changed) {
         last_pct = pct;
         last_charging = charging;
         ui_update_battery(pct, charging);
+    }
+    // Send telemetry on battery change or screen switch (throttled to 10s
+    // so IMU rotation doesn't flood BLE — battery changes at 2s anyway).
+    screen_t cur_screen = ui_get_current_screen();
+    uint32_t now_ms = millis();
+    bool screen_changed = (cur_screen != last_telem_screen);
+    if ((bat_changed || screen_changed) &&
+        (now_ms - last_telem_ms >= 10000 || screen_changed)) {
+        ble_send_telemetry(pct, (int)cur_screen, charging);
+        last_telem_screen = cur_screen;
+        last_telem_ms = now_ms;
     }
 
     check_serial_cmd();
@@ -564,7 +578,10 @@ void loop() {
             // `usage` stays (fallback). No-op stub on non-WiFi boards.
             sprint_net_get(&usage);
             ui_update(&usage);
-            ble_send_ack();
+            // Send telemetry on every data receipt so the daemon always has a
+            // fresh battery+screen snapshot to pair with this payload in the log.
+            ble_send_telemetry(pct, (int)cur_screen, charging);
+            last_telem_ms = now_ms;
         } else {
             ble_send_nack();
         }

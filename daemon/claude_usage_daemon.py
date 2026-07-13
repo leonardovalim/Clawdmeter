@@ -54,6 +54,7 @@ def _sanitize_display_strings(obj):
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
+TX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000003"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 PROV_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"
 
@@ -894,13 +895,15 @@ def _log_usage(payload: dict) -> None:
     """Append one JSON-lines record per poll — the raw dataset for the usage
     report. Best-effort: a logging failure must never disturb the poll loop.
     Skips transient/bulky fields (media, chime/clock flags); keeps everything
-    that describes usage over time. Mirrors the Windows daemon."""
+    that describes usage over time, including device telemetry (battery %,
+    screen id, charging flag) for the per-screen battery report."""
     try:
         rec = {
             "ts": round(time.time(), 1),
             "iso": datetime.datetime.now().isoformat(timespec="seconds"),
         }
-        for k in ("s", "sr", "w", "wr", "st", "acct", "ch", "tp", "pd", "rd"):
+        for k in ("s", "sr", "w", "wr", "st", "acct", "ch", "tp", "pd", "rd",
+                  "bat", "sc", "chg"):
             if k in payload:
                 rec[k] = payload[k]
         bd = payload.get("bd")
@@ -915,14 +918,24 @@ def _log_usage(payload: dict) -> None:
         log(f"usage log write failed: {e}")
 
 
-async def _enrich_extra_screens(payload: dict) -> None:
+async def _enrich_extra_screens(payload: dict, telemetry: dict | None = None) -> None:
     """Add the media/heatmap/burndown fields to the active plan's payload.
 
     Runs once per cycle on the chosen payload (not per config dir), so the
     heatmap peak and the Asana poll aren't double-counted across plans. `ch`
     (cache hit) is set per-call in poll_api since it's read from that call's
     own response body.
+
+    ``telemetry`` carries device-side metrics (battery %, screen id, charging
+    flag) from the firmware's TX_CHAR notifications. When present, the fields
+    are injected into the payload so ``_log_usage`` records them for the
+    per-screen battery report.
     """
+    if telemetry:
+        for k in ("bat", "sc", "chg"):
+            if k in telemetry:
+                payload[k] = telemetry[k]
+
     payload["hm"] = _update_heatmap(int(payload.get("s", 0) or 0))
 
     mi = await _get_media_info()
@@ -941,7 +954,13 @@ async def _enrich_extra_screens(payload: dict) -> None:
     if _asana_cache is not None:
         payload["bd"] = _asana_cache
 
-    _log_usage(payload)   # payload completo (s/w/ch + hm/mi/bd) → log do relatório
+    _log_usage(payload)   # payload + telemetry → log do relatório
+
+    # Don't echo telemetry back to the firmware — the device already knows its
+    # own battery state. Pop after _log_usage so the cached payload (which gets
+    # re-sent on media updates) stays clean.
+    for k in ("bat", "sc", "chg"):
+        payload.pop(k, None)
 
 
 async def poll_api(token: str) -> dict | None:
@@ -1088,11 +1107,15 @@ class PlanSelector:
 _SELECTOR = PlanSelector()
 
 
-async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None:
+async def poll_active_payload(selector: PlanSelector = _SELECTOR,
+                              telemetry: dict | None = None) -> dict | None:
     """Poll every configured config dir and return the active plan's payload.
 
     Returns None when no dir yields a usable payload this cycle. A single
     configured dir (the default) collapses to exactly the old single-poll path.
+
+    ``telemetry`` forwards device-side metrics to ``_enrich_extra_screens``
+    so they land in ``_log_usage`` alongside this poll's API data.
     """
     dirs = read_config_dirs()
     payloads: dict[Path, dict] = {}
@@ -1112,7 +1135,7 @@ async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None
     if len(dirs) > 1:
         log(f"Active plan: {active} (s={sessions[active]})")
     active_payload = payloads[active]
-    await _enrich_extra_screens(active_payload)   # media / heatmap / burndown
+    await _enrich_extra_screens(active_payload, telemetry=telemetry)
     return active_payload
 
 
@@ -1124,6 +1147,17 @@ class Session:
         # and pushes the new track/state instead of waiting out the 5s TICK.
         self.media_dirty = asyncio.Event()
         self._loop = asyncio.get_running_loop()
+        # Latest device telemetry (battery %, screen id, charging flag) —
+        # refreshed by TX_CHAR notifications and injected into each payload
+        # before logging so the usage report shows battery-per-screen.
+        self.latest_telemetry: dict = {}
+
+    def _on_telemetry(self, _char, data: bytearray) -> None:
+        """Parse device telemetry JSON: {"bat":85,"sc":1,"chg":0}."""
+        try:
+            self.latest_telemetry = json.loads(data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
 
     def _on_refresh(self, _char, data: bytearray) -> None:
         # REQ_CHAR carries a one-byte opcode: 0x01 = refresh, 0x1x = transport.
@@ -1167,6 +1201,19 @@ class Session:
             log(f"Refresh subscription unavailable: {e}")
         except asyncio.TimeoutError:
             log("Refresh subscription timed out; polling without it")
+
+        # Device telemetry (battery %, screen id, charging flag) is notified on
+        # TX_CHAR. Subscribe so every usage_log.jsonl record carries a battery
+        # snapshot for the per-screen battery report.
+        try:
+            await asyncio.wait_for(
+                self.client.start_notify(TX_CHAR_UUID, self._on_telemetry),
+                timeout=10,
+            )
+        except (BleakError, ValueError) as e:
+            log(f"Telemetry subscription unavailable: {e}")
+        except asyncio.TimeoutError:
+            log("Telemetry subscription timed out; logging without it")
 
     async def write_payload(self, payload: dict) -> bool:
         data = json.dumps(payload, separators=(",", ":")).encode()
@@ -1361,7 +1408,8 @@ async def connect_and_run(target, stop_event: asyncio.Event, tray_state=None) ->
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                payload = await poll_active_payload()
+                payload = await poll_active_payload(
+                    telemetry=session.latest_telemetry or None)
                 if payload is None:
                     log("No usable config dir this cycle")
                     # Only surface the actionable "token expired" error when there

@@ -18,15 +18,27 @@ import html
 import json
 import os
 import statistics
+from collections import defaultdict
 from pathlib import Path
 
 ACCENT = "#d97757"
 GREEN = "#7bb662"
 AMBER = "#d9a55a"
+BLUE = "#5b9bd5"
 DIM = "#8a827a"
 BG = "#191917"
 PANEL = "#242220"
 TEXT = "#ece7e1"
+
+# Screen id → label (matches firmware screen_t enum).
+SCREEN_LABELS = {
+    0: "Splash",
+    1: "Uso",
+    2: "Mídia",
+    3: "—",        # SCREEN_STATS (compiled, not mapped)
+    4: "Sprint",
+    5: "Ritmo",
+}
 
 
 def default_log_path() -> Path:
@@ -151,6 +163,65 @@ def build_html(recs: list[dict]) -> str:
 
     s_series = [(r["ts"], float(r["s"])) for r in recs if "s" in r]
     w_series = [(r["ts"], float(r["w"])) for r in recs if "w" in r]
+    bat_series = [(r["ts"], float(r["bat"])) for r in recs if "bat" in r]
+
+    # --- Battery stats --------------------------------------------------------
+    bat_html = ""
+    if bat_series:
+        bat_vals = [b for _, b in bat_series]
+        bat_start = bat_vals[0]
+        bat_end = bat_vals[-1]
+        bat_delta = bat_end - bat_start
+        bat_delta_color = GREEN if bat_delta >= 0 else ACCENT
+        bat_delta_sign = "+" if bat_delta >= 0 else ""
+        cards.extend([
+            stat_card("Bateria inicial", f"{bat_start:.0f}%", BLUE),
+            stat_card("Bateria final", f"{bat_end:.0f}%", BLUE),
+            stat_card("Delta", f"{bat_delta_sign}{bat_delta:.0f}%", bat_delta_color),
+        ])
+
+        # Per-screen consumption: group consecutive records by screen, accumulate
+        # battery drop and elapsed seconds per screen.
+        screen_deltas: dict[int, list[float]] = defaultdict(list)
+        prev = None
+        for r in recs:
+            if "bat" not in r or "sc" not in r:
+                prev = None
+                continue
+            cur = (r["ts"], r["bat"], r["sc"])
+            if prev is not None:
+                t0, b0, s0 = prev
+                t1, b1, s1 = cur
+                elapsed = t1 - t0
+                if elapsed > 0 and s0 == s1 and s0 in SCREEN_LABELS and SCREEN_LABELS[s0] != "—":
+                    # Battery drop rate in %/hour (positive = charging).
+                    rate = (b1 - b0) / elapsed * 3600
+                    screen_deltas[s0].append(rate)
+            prev = cur
+
+        if screen_deltas:
+            rows = []
+            for sc_id in sorted(screen_deltas):
+                rates = screen_deltas[sc_id]
+                if len(rates) < 2:
+                    continue
+                avg = statistics.mean(rates)
+                label = SCREEN_LABELS.get(sc_id, str(sc_id))
+                direction = "carregando" if avg > 0 else "consumo"
+                sign = "+" if avg > 0 else ""
+                color = GREEN if avg >= 0 else ACCENT
+                rows.append(
+                    f'<tr><td style="color:{TEXT}">{label}</td>'
+                    f'<td style="color:{color}">{sign}{abs(avg):.1f}%/h</td>'
+                    f'<td style="color:{DIM}">{direction}</td></tr>')
+            bat_html = (
+                f'<h2>Bateria ao longo do tempo</h2>'
+                f'<div class="panel">{line_chart(bat_series, BLUE, label="Bateria %")}</div>'
+                f'<h2>Consumo por tela (média)</h2>'
+                f'<div class="panel"><table style="width:100%;border-collapse:collapse">'
+                f'<tr style="color:{DIM};font-size:12px"><th align="left">Tela</th>'
+                f'<th align="left">Taxa</th><th align="left"></th></tr>'
+                f'{"".join(rows)}</table></div>')
 
     # Sprint block (last known)
     sprint_html = ""
@@ -193,6 +264,7 @@ h1{{font-size:24px;margin:0 0 2px}} h2{{font-size:16px;margin:30px 0 10px;color:
 <div class="panel">{line_chart(w_series, AMBER, label="Semanal %")}</div>
 <h2>Quando você mais usa (sessão % média · dia × hora)</h2>
 <div class="panel">{hour_heatmap(recs)}</div>
+{bat_html}
 {sprint_html}
 <div class="foot">Gerado em {gen} · fonte: usage_log.jsonl</div>
 </body></html>"""

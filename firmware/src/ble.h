@@ -20,7 +20,7 @@ const char* ble_get_data(void);
 // Album art: true when the art state changed since the last call. *buf == nullptr
 // means "cleared" (no art for the current track). Always false on PSRAM-less boards.
 bool ble_take_album_art(const uint8_t** buf, int* w, int* h);
-void ble_send_ack(void);
+void ble_send_telemetry(int battery_pct, int screen_id, bool charging);
 void ble_send_nack(void);
 void ble_request_refresh(void);
 

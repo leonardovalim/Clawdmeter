@@ -498,9 +498,13 @@ bool ble_take_album_art(const uint8_t** buf, int* w, int* h) {
 #endif
 }
 
-void ble_send_ack(void) {
+void ble_send_telemetry(int battery_pct, int screen_id, bool charging) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
-        tx_char->setValue("{\"ack\":true}");
+        char buf[64];
+        snprintf(buf, sizeof(buf),
+            "{\"bat\":%d,\"sc\":%d,\"chg\":%d}",
+            battery_pct, screen_id, charging ? 1 : 0);
+        tx_char->setValue((uint8_t*)buf, strlen(buf));
         tx_char->notify();
     }
 }
